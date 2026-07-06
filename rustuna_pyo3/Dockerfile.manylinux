@@ -1,0 +1,36 @@
+# docker build -f rustuna_pyo3/Dockerfile.manylinux -t rustuna-manylinux .
+# docker run --rm -v $(pwd):/io rustuna-manylinux
+
+FROM quay.io/pypa/manylinux_2_28_x86_64
+
+ARG RUST_VERSION=1.87.0
+ENV PATH="/root/.cargo/bin:${PATH}"
+ENV MANYLINUX="2_28"
+ENV PYTHONS="/opt/python/cp311*/bin /opt/python/cp312*/bin /opt/python/cp313*/bin /opt/python/cp314*/bin"
+
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain "${RUST_VERSION}" --profile minimal
+RUN for PYBIN in ${PYTHONS}; do \
+      "${PYBIN}/pip" install --upgrade pip && \
+      "${PYBIN}/pip" install "maturin>=1.6,<2"; \
+    done
+
+WORKDIR /io
+
+RUN cat <<'EOF' >/usr/local/bin/build-wheels.sh
+#!/bin/bash
+set -euo pipefail
+cd /io
+rm -rf wheelhouse
+mkdir -p wheelhouse
+
+for PYBIN in ${PYTHONS}; do
+    "${PYBIN}/maturin" build --release --strip \
+        --manylinux "${MANYLINUX}" \
+        --interpreter "${PYBIN}/python" \
+        --manifest-path rustuna_pyo3/Cargo.toml \
+        --out /io/wheelhouse
+done
+EOF
+RUN chmod +x /usr/local/bin/build-wheels.sh
+
+ENTRYPOINT ["/usr/local/bin/build-wheels.sh"]

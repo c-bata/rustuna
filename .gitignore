@@ -7,6 +7,7 @@ node_modules/
 rustuna_js/pkg/
 
 # Python
+wheelhouse/
 __pycache__/
 .pytest_cache/
 *.py[cod]
