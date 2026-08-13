@@ -1,4 +1,3 @@
-use core::panic;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -40,6 +39,14 @@ impl Default for TpeConfig {
 
 type SplitKey = (Vec<u32>, usize);
 type SplitValue = (Vec<u32>, Vec<u32>);
+
+struct TpeObservation {
+    trial_number: u32,
+    values: Vec<f64>,
+    params: Vec<Option<f64>>,
+    constraints: HashMap<String, f64>,
+}
+
 /// Tree-structured Parzen Estimator sampler.
 ///
 /// This sampler is the Rustuna counterpart of Optuna's `TPESampler`.
@@ -146,7 +153,7 @@ impl TpeSampler {
     fn sample(
         &self,
         ctx: &Context,
-        complete_trials: &[&rustuna_core::trial::PersistedTrial],
+        complete_trials: &[TpeObservation],
         search_space: &HashMap<String, Distribution>,
     ) -> Result<HashMap<String, f64>> {
         let is_multi_objective = ctx.directions.len() > 1;
@@ -166,7 +173,7 @@ impl TpeSampler {
             let gamma = Self::gamma_for_multi_objective(complete_trials.len());
             let complete_trial_numbers = complete_trials
                 .iter()
-                .map(|t| t.number)
+                .map(|t| t.trial_number)
                 .collect::<Vec<u32>>();
             let split_cache_key = (complete_trial_numbers.clone(), gamma);
             let cached_split = self
@@ -180,39 +187,46 @@ impl TpeSampler {
                 })?
                 .get(&split_cache_key)
                 .cloned();
-            let (good_trials, poor_trials): (
-                Vec<&rustuna_core::trial::PersistedTrial>,
-                Vec<&rustuna_core::trial::PersistedTrial>,
-            ) = if let Some((good_nums, poor_nums)) = cached_split {
-                let good_trials = complete_trials
-                    .iter()
-                    .copied()
-                    .filter(|t| good_nums.contains(&t.number))
-                    .collect::<Vec<_>>();
-                let poor_trials = complete_trials
-                    .iter()
-                    .copied()
-                    .filter(|t| poor_nums.contains(&t.number))
-                    .collect::<Vec<_>>();
-                (good_trials, poor_trials)
-            } else {
-                let (good_trials, poor_trials) = multi_objective::split_trials_for_multi_objective(
-                    complete_trials,
-                    directions,
-                    gamma,
-                )?;
-                let good_nums = good_trials.iter().map(|t| t.number).collect();
-                let poor_nums = poor_trials.iter().map(|t| t.number).collect();
-                let mut split_cache = self.split_cache.write().map_err(|e| {
-                    Error::with_reason(
-                        ErrorKind::SamplerError,
-                        format!("Failed to acquire split cache guard: {e}"),
-                    )
-                })?;
-                split_cache.clear();
-                split_cache.insert(split_cache_key, (good_nums, poor_nums));
-                (good_trials, poor_trials)
-            };
+            let (good_trials, poor_trials): (Vec<&TpeObservation>, Vec<&TpeObservation>) =
+                if let Some((good_nums, poor_nums)) = cached_split {
+                    let good_trials = complete_trials
+                        .iter()
+                        .filter(|t| good_nums.contains(&t.trial_number))
+                        .collect::<Vec<_>>();
+                    let poor_trials = complete_trials
+                        .iter()
+                        .filter(|t| poor_nums.contains(&t.trial_number))
+                        .collect::<Vec<_>>();
+                    (good_trials, poor_trials)
+                } else {
+                    let values = complete_trials
+                        .iter()
+                        .map(|trial| trial.values.as_slice())
+                        .collect::<Vec<_>>();
+                    let (good_indices, poor_indices) =
+                        multi_objective::split_observation_indices_for_multi_objective(
+                            &values, directions, gamma,
+                        );
+                    let good_trials = good_indices
+                        .into_iter()
+                        .map(|i| &complete_trials[i])
+                        .collect::<Vec<_>>();
+                    let poor_trials = poor_indices
+                        .into_iter()
+                        .map(|i| &complete_trials[i])
+                        .collect::<Vec<_>>();
+                    let good_nums = good_trials.iter().map(|t| t.trial_number).collect();
+                    let poor_nums = poor_trials.iter().map(|t| t.trial_number).collect();
+                    let mut split_cache = self.split_cache.write().map_err(|e| {
+                        Error::with_reason(
+                            ErrorKind::SamplerError,
+                            format!("Failed to acquire split cache guard: {e}"),
+                        )
+                    })?;
+                    split_cache.clear();
+                    split_cache.insert(split_cache_key, (good_nums, poor_nums));
+                    (good_trials, poor_trials)
+                };
             // Multi-objective: uniform weights for l(x) (below), recency ramp for g(x) (above),
             // matching Optuna's multi-objective TPE.
             (
@@ -244,13 +258,10 @@ impl TpeSampler {
     }
 
     fn split_trials_for_single_objective<'a>(
-        trials: &[&'a rustuna_core::trial::PersistedTrial],
+        trials: &'a [TpeObservation],
         direction: &Direction,
         gamma: usize,
-    ) -> Result<(
-        Vec<&'a rustuna_core::trial::PersistedTrial>,
-        Vec<&'a rustuna_core::trial::PersistedTrial>,
-    )> {
+    ) -> Result<(Vec<&'a TpeObservation>, Vec<&'a TpeObservation>)> {
         let n = trials.len();
         assert!(
             gamma <= n,
@@ -261,22 +272,19 @@ impl TpeSampler {
             return Ok((Vec::new(), Vec::new()));
         }
         if gamma == n {
-            return Ok((trials.to_vec(), Vec::new()));
+            return Ok((trials.iter().collect(), Vec::new()));
         }
 
-        fn value_for(t: &rustuna_core::trial::PersistedTrial) -> f64 {
-            match &t.state_values {
-                TrialStateValues::Complete(v) => v[0],
-                _ => panic!("Unexpected non-complete trial found during TPE sampling"),
-            }
+        fn value_for(t: &TpeObservation) -> f64 {
+            t.values[0]
         }
 
-        // Since `usable_complete_trials` already filtered non-completed trials,
+        // Since `snapshot_usable_complete_trials` already filtered non-completed trials,
         // we only check feasiblity of `trial`.
         let feasibles_violations = trials
             .iter()
             .map(|trial| {
-                let constraints = trial.constraints()?;
+                let constraints = &trial.constraints;
                 let feasible = constraints.values().all(|x| *x <= 0.0);
                 let violation = constraints.values().filter(|&x| *x > 0.0).sum::<f64>();
                 Ok((feasible, violation))
@@ -292,8 +300,8 @@ impl TpeSampler {
         // directions.
         let mut idx: Vec<usize> = (0..n).collect();
         let compare_feasibles = |i, j| {
-            let vi = value_for(trials[i]);
-            let vj = value_for(trials[j]);
+            let vi = value_for(&trials[i]);
+            let vj = value_for(&trials[j]);
             match (vi.is_nan(), vj.is_nan()) {
                 (true, true) => Ordering::Equal,
                 (true, false) => Ordering::Greater,
@@ -325,10 +333,10 @@ impl TpeSampler {
         let mut good_trials = Vec::with_capacity(gamma);
         let mut poor_trials = Vec::with_capacity(n - gamma);
         for &i in idx.iter().take(gamma) {
-            good_trials.push(trials[i]);
+            good_trials.push(&trials[i]);
         }
         for &i in idx.iter().skip(gamma) {
-            poor_trials.push(trials[i]);
+            poor_trials.push(&trials[i]);
         }
         Ok((good_trials, poor_trials))
     }
@@ -343,20 +351,36 @@ impl TpeSampler {
         (0.1 * n as f64).ceil() as usize
     }
 
-    /// Keep only trials whose `Complete` values are fully finite-or-±inf. Trials
-    /// carrying NaN are dropped here, before the `n_startup_trials` gate, so they
-    /// neither inflate `gamma` nor leak into `good_trials`. In the all-NaN /
-    /// finite-count-below-startup case the resulting empty / short list naturally
-    /// falls through to the random sampler via the existing startup gate.
-    fn usable_complete_trials(
+    fn snapshot_usable_complete_trials(
         trials: &[Option<rustuna_core::trial::PersistedTrial>],
-    ) -> Vec<&rustuna_core::trial::PersistedTrial> {
+        search_space: &HashMap<String, Distribution>,
+    ) -> Result<Vec<TpeObservation>> {
+        let mut sorted_keys = search_space.keys().collect::<Vec<_>>();
+        sorted_keys.sort();
         trials
             .iter()
             .flatten()
-            .filter(|t| match &t.state_values {
-                TrialStateValues::Complete(v) => !v.iter().any(|x| x.is_nan()),
-                _ => false,
+            .filter_map(|trial| {
+                let TrialStateValues::Complete(values) = &trial.state_values else {
+                    return None;
+                };
+                if values.iter().any(|x| x.is_nan()) {
+                    return None;
+                }
+                Some((trial, values.clone()))
+            })
+            .map(|(trial, values)| {
+                let constraints = trial.constraints()?;
+                let params = sorted_keys
+                    .iter()
+                    .map(|name| trial.internal_params.get(*name).copied())
+                    .collect();
+                Ok(TpeObservation {
+                    trial_number: trial.number,
+                    values: values.clone(),
+                    params,
+                    constraints,
+                })
             })
             .collect()
     }
@@ -390,7 +414,7 @@ impl TpeSampler {
     }
 
     fn build_parzen_estimator(
-        trials: &[&rustuna_core::trial::PersistedTrial],
+        trials: &[&TpeObservation],
         search_space: &HashMap<String, Distribution>,
         recency_ramp: bool,
     ) -> ParzenEstimator {
@@ -405,9 +429,8 @@ impl TpeSampler {
         // Optuna's `default_weights`. (Uniform weights are order-invariant, so sorting is
         // harmless there; the split routines do not preserve chronological order.)
         let mut order: Vec<usize> = (0..n_trials).collect();
-        order.sort_by_key(|&i| trials[i].number);
-        let trials: Vec<&rustuna_core::trial::PersistedTrial> =
-            order.iter().map(|&i| trials[i]).collect();
+        order.sort_by_key(|&i| trials[i].trial_number);
+        let trials = order.iter().map(|&i| trials[i]).collect::<Vec<_>>();
 
         let mut observations_vec: Vec<Vec<f64>> = (0..n_params)
             .map(|_| Vec::with_capacity(n_trials))
@@ -415,9 +438,9 @@ impl TpeSampler {
         let mut active_counts: Vec<u32> = vec![0; n_trials];
 
         for (trial_idx, t) in trials.iter().enumerate() {
-            for (param_idx, key) in sorted_keys.iter().enumerate() {
-                if let Some(&v) = t.internal_params.get(*key) {
-                    observations_vec[param_idx].push(v);
+            for (param_idx, param) in t.params.iter().enumerate() {
+                if let Some(v) = param {
+                    observations_vec[param_idx].push(*v);
                     active_counts[trial_idx] += 1;
                 }
             }
@@ -457,7 +480,8 @@ impl Sampler for TpeSampler {
             return distribution.get_single_value();
         }
 
-        {
+        let search_space = HashMap::from([(name.to_string(), distribution.clone())]);
+        let complete_trials = {
             let mut guard = storage.write().map_err(|e| {
                 Error::with_reason(
                     ErrorKind::Unexpected,
@@ -465,13 +489,11 @@ impl Sampler for TpeSampler {
                 )
             })?;
             let trials = guard.get_trials(ctx.study_id)?;
-            let complete_trials: Vec<&rustuna_core::trial::PersistedTrial> =
-                Self::usable_complete_trials(trials);
-            if complete_trials.len() >= self.n_startup_trials {
-                let search_space = HashMap::from([(name.to_string(), distribution.clone())]);
-                let params = self.sample(ctx, &complete_trials, &search_space)?;
-                return Ok(params[name]);
-            }
+            Self::snapshot_usable_complete_trials(trials, &search_space)?
+        };
+        if complete_trials.len() >= self.n_startup_trials {
+            let params = self.sample(ctx, &complete_trials, &search_space)?;
+            return Ok(params[name]);
         }
         self.random_sampler
             .sample_independent(ctx, storage, name, distribution)
@@ -505,15 +527,16 @@ impl Sampler for TpeSampler {
             return Ok(HashMap::new());
         }
 
-        let mut guard = storage.write().map_err(|e| {
-            Error::with_reason(
-                ErrorKind::Unexpected,
-                format!("Failed to acquire storage guard: {e}"),
-            )
-        })?;
-        let trials = guard.get_trials(ctx.study_id)?;
-        let complete_trials: Vec<&rustuna_core::trial::PersistedTrial> =
-            Self::usable_complete_trials(trials);
+        let complete_trials = {
+            let mut guard = storage.write().map_err(|e| {
+                Error::with_reason(
+                    ErrorKind::Unexpected,
+                    format!("Failed to acquire storage guard: {e}"),
+                )
+            })?;
+            let trials = guard.get_trials(ctx.study_id)?;
+            Self::snapshot_usable_complete_trials(trials, search_space)?
+        };
         if complete_trials.len() < self.n_startup_trials {
             return Ok(HashMap::new());
         }
@@ -695,7 +718,7 @@ mod tests {
     }
 
     /// When every completed trial is NaN the sampler must not feed NaN observations
-    /// into the Parzen estimator; the entry-side `usable_complete_trials` filter
+    /// into the Parzen estimator; the entry-side snapshot filter
     /// drops NaN trials before the startup gate so the sampler falls back to random
     /// sampling cleanly.
     #[test]
