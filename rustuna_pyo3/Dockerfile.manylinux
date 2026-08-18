@@ -7,6 +7,7 @@ ARG RUST_VERSION=1.87.0
 ENV PATH="/root/.cargo/bin:${PATH}"
 ENV MANYLINUX="2_28"
 ENV PYTHONS="/opt/python/cp311*/bin /opt/python/cp312*/bin /opt/python/cp313*/bin /opt/python/cp314*/bin"
+ENV ABI3_PYBIN="/opt/python/cp311-cp311/bin"
 
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain "${RUST_VERSION}" --profile minimal
 RUN for PYBIN in ${PYTHONS}; do \
@@ -30,6 +31,13 @@ for PYBIN in ${PYTHONS}; do
         --manifest-path rustuna_pyo3/Cargo.toml \
         --out /io/wheelhouse
 done
+
+"${ABI3_PYBIN}/maturin" build --release --strip \
+    --manylinux "${MANYLINUX}" \
+    --interpreter "${ABI3_PYBIN}/python" \
+    --features pyo3/abi3-py311 \
+    --manifest-path rustuna_pyo3/Cargo.toml \
+    --out /io/wheelhouse
 EOF
 RUN chmod +x /usr/local/bin/build-wheels.sh
 
