@@ -27,7 +27,6 @@ rand = "0.8.5"
 
 # Profile used to build the wheels published to PyPI (`maturin build --profile dist-release`).
 # Slower to compile than `release`, but produces the fastest and smallest extension module.
-# Note: `panic = "abort"` must NOT be set here; pyo3 converts Rust panics into Python exceptions.
 [profile.dist-release]
 inherits = "release"
 lto = "fat"
