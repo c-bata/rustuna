@@ -21,6 +21,7 @@ env:
   MATURIN_VERSION: v1.14.1
   UV_VERSION: 0.12.1
   UV_EXCLUDE_NEWER: 5 days
+  PIP_VERSION: 26.1.2
   TWINE_VERSION: 6.2.0
   ABI3AUDIT_VERSION: 0.0.26
   BUILD_ARGS: >-
@@ -113,6 +114,7 @@ jobs:
         # Resolving the `abi3t` tag requires uv 0.11.3 or later.
         run: |
           set -euxo pipefail
+          shopt -s nullglob
           wheels=(dist/*.whl)
           [ "${#wheels[@]}" -eq 1 ] || { echo "expected exactly one wheel: ${wheels[*]}" >&2; exit 1; }
           uv pip install --reinstall --no-deps "${wheels[0]}"
@@ -204,15 +206,19 @@ jobs:
           - platform: macos-x86_64
             runner: macos-15-intel
             target: x86_64-apple-darwin
+            architecture: x64
           - platform: macos-arm64
             runner: macos-15
             target: aarch64-apple-darwin
+            architecture: arm64
           - platform: windows-x86_64
             runner: windows-2025
             target: x86_64-pc-windows-msvc
+            architecture: x64
           - platform: windows-arm64
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
+            architecture: arm64
           - variant: abi3
             python: "3.11"
             artifact_suffix: cp311-abi3
@@ -223,31 +229,35 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install uv and CPython ${{ matrix.python }}
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      # setup-python selects the requested CPU architecture explicitly, so maturin and the smoke
+      # test use the same native interpreter on macOS and Windows, including ARM64.
+      - name: Install CPython ${{ matrix.python }}
+        id: setup-python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          version: ${{ env.UV_VERSION }}
           python-version: ${{ matrix.python }}
-          activate-environment: true
-          enable-cache: false
+          architecture: ${{ matrix.architecture }}
+          allow-prereleases: true
       - name: Build wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           target: ${{ matrix.target }}
           command: build
-          args: ${{ env.BUILD_ARGS }} -i python
+          args: ${{ env.BUILD_ARGS }} -i ${{ steps.setup-python.outputs.python-path }}
           maturin-version: ${{ env.MATURIN_VERSION }}
       - name: Test wheel and bundled SQLite
-        # Resolving the `abi3t` tag requires uv 0.11.3 or later.
+        env:
+          PYTHON_PATH: ${{ steps.setup-python.outputs.python-path }}
         run: |
           set -euxo pipefail
+          shopt -s nullglob
           wheels=(dist/*.whl)
           [ "${#wheels[@]}" -eq 1 ] || { echo "expected exactly one wheel: ${wheels[*]}" >&2; exit 1; }
-          uv pip install --reinstall --no-deps "${wheels[0]}"
+          "$PYTHON_PATH" -m pip install "pip==$PIP_VERSION"
+          "$PYTHON_PATH" -m pip install --no-deps "${wheels[0]}"
           # On a free-threaded interpreter, importing rustuna must not make CPython fall back to a
           # GIL-enabled runtime. No-op on GIL-enabled builds, so the abi3 and abi3t legs share it.
-          python -I -c 'import sys, sysconfig, rustuna; assert not sysconfig.get_config_var("Py_GIL_DISABLED") or not sys._is_gil_enabled(), "importing rustuna re-enabled the GIL"'
-          python -I -c 'import tempfile, rustuna; workdir = tempfile.TemporaryDirectory(); rustuna.storages.SQLite3Storage(f"{workdir.name}/rustuna.db")'
+          "$PYTHON_PATH" -I -c 'import sys, sysconfig, tempfile, rustuna; assert not sysconfig.get_config_var("Py_GIL_DISABLED") or not sys._is_gil_enabled(), "importing rustuna re-enabled the GIL"; workdir = tempfile.TemporaryDirectory(); rustuna.storages.SQLite3Storage(f"{workdir.name}/rustuna.db")'
       - name: Upload wheel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -295,6 +305,7 @@ jobs:
       - name: Test abi3 wheel and bundled SQLite
         run: |
           set -euxo pipefail
+          shopt -s nullglob
           wheels=(dist/*.whl)
           [ "${#wheels[@]}" -eq 1 ] || { echo "expected exactly one wheel: ${wheels[*]}" >&2; exit 1; }
           uv pip install --reinstall --no-deps "${wheels[0]}"
