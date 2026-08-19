@@ -24,3 +24,11 @@ rustuna_sampler = { path = "./rustuna_sampler" }
 rustuna_importance = { path = "./rustuna_importance" }
 rustuna_storage = { path = "./rustuna_storage" }
 rand = "0.8.5"
+
+# Profile used to build the wheels published to PyPI (`maturin build --profile dist-release`).
+# Slower to compile than `release`, but produces the fastest and smallest extension module.
+[profile.dist-release]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
