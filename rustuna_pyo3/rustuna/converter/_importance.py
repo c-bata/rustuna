@@ -8,6 +8,7 @@ from optuna.trial import FrozenTrial
 
 import rustuna
 from rustuna.converter._storage import ToRustunaStorage
+from rustuna.converter._trial import to_frozen_trial
 
 
 class ToOptunaImportanceEvaluator(BaseImportanceEvaluator):
@@ -17,7 +18,6 @@ class ToOptunaImportanceEvaluator(BaseImportanceEvaluator):
     ) -> None:
         self._evaluator = evaluator
 
-    # TODO(kAIto47802): Support the `target` argument in Rustuna's PED-ANOVA evaluator.
     def evaluate(
         self,
         study: optuna.Study,
@@ -28,4 +28,13 @@ class ToOptunaImportanceEvaluator(BaseImportanceEvaluator):
         rustuna_study = rustuna.load_study(
             study_name=study.study_name, storage=ToRustunaStorage(study._storage)
         )
-        return self._evaluator.evaluate(rustuna_study, params=params)
+        rustuna_target = None if target is None else _to_rustuna_target(target)
+        return self._evaluator.evaluate(
+            rustuna_study, params=params, target=rustuna_target
+        )
+
+
+def _to_rustuna_target(
+    target: Callable[[FrozenTrial], float],
+) -> Callable[[rustuna.trial.PersistedTrial], float]:
+    return lambda trial: target(to_frozen_trial(trial))

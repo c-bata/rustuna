@@ -1,7 +1,7 @@
 use core::panic;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -93,12 +93,12 @@ type SplitValue = (Vec<u32>, Vec<u32>);
 /// }
 /// ```
 pub struct TpeSampler {
-    rng: StdRng,
+    rng: Mutex<StdRng>,
     multivariate: Option<bool>,
     n_startup_trials: usize,
     random_sampler: RandomSampler,
     // TODO(y0z): Change to LruCache<(Vec<&PersistedTrial>, usize), (Vec<&PersistedTrial>, Vec<&PersistedTrial>)>
-    split_cache: HashMap<SplitKey, SplitValue>,
+    split_cache: RwLock<HashMap<SplitKey, SplitValue>>,
 }
 impl Default for TpeSampler {
     fn default() -> Self {
@@ -114,11 +114,11 @@ impl TpeSampler {
         };
         let seed_for_random_sampler = rng.gen();
         Self {
-            rng,
+            rng: Mutex::new(rng),
             multivariate: cfg.multivariate,
             n_startup_trials: cfg.n_startup_trials,
             random_sampler: RandomSampler::seed_from_u64(seed_for_random_sampler),
-            split_cache: HashMap::new(),
+            split_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -144,7 +144,7 @@ impl TpeSampler {
     }
 
     fn sample(
-        &mut self,
+        &self,
         ctx: &Context,
         complete_trials: &[&rustuna_core::trial::PersistedTrial],
         search_space: &HashMap<String, Distribution>,
@@ -155,7 +155,7 @@ impl TpeSampler {
             let gamma = Self::gamma_for_single_objective(complete_trials.len());
             let direction: &Direction = &ctx.directions[0];
             let (good_trials, poor_trials) =
-                Self::split_trials_for_single_objective(complete_trials, direction, gamma);
+                Self::split_trials_for_single_objective(complete_trials, direction, gamma)?;
             // Single-objective: recency ramp for both l(x) and g(x) (Optuna default_weights).
             (
                 Self::build_parzen_estimator(&good_trials, search_space, true),
@@ -169,11 +169,21 @@ impl TpeSampler {
                 .map(|t| t.number)
                 .collect::<Vec<u32>>();
             let split_cache_key = (complete_trial_numbers.clone(), gamma);
+            let cached_split = self
+                .split_cache
+                .read()
+                .map_err(|e| {
+                    Error::with_reason(
+                        ErrorKind::SamplerError,
+                        format!("Failed to acquire split cache guard: {e}"),
+                    )
+                })?
+                .get(&split_cache_key)
+                .cloned();
             let (good_trials, poor_trials): (
                 Vec<&rustuna_core::trial::PersistedTrial>,
                 Vec<&rustuna_core::trial::PersistedTrial>,
-            ) = if self.split_cache.contains_key(&split_cache_key) {
-                let (good_nums, poor_nums) = self.split_cache.get(&split_cache_key).unwrap();
+            ) = if let Some((good_nums, poor_nums)) = cached_split {
                 let good_trials = complete_trials
                     .iter()
                     .copied()
@@ -190,13 +200,17 @@ impl TpeSampler {
                     complete_trials,
                     directions,
                     gamma,
-                );
+                )?;
                 let good_nums = good_trials.iter().map(|t| t.number).collect();
                 let poor_nums = poor_trials.iter().map(|t| t.number).collect();
-                // We only cache the most recent split
-                self.split_cache.clear();
-                self.split_cache
-                    .insert(split_cache_key, (good_nums, poor_nums));
+                let mut split_cache = self.split_cache.write().map_err(|e| {
+                    Error::with_reason(
+                        ErrorKind::SamplerError,
+                        format!("Failed to acquire split cache guard: {e}"),
+                    )
+                })?;
+                split_cache.clear();
+                split_cache.insert(split_cache_key, (good_nums, poor_nums));
                 (good_trials, poor_trials)
             };
             // Multi-objective: uniform weights for l(x) (below), recency ramp for g(x) (above),
@@ -208,7 +222,15 @@ impl TpeSampler {
         };
 
         let n_ei_candidates = 24;
-        let samples_good = pe_good.sample(&mut self.rng, n_ei_candidates);
+        let samples_good = {
+            let mut rng = self.rng.lock().map_err(|e| {
+                Error::with_reason(
+                    ErrorKind::SamplerError,
+                    format!("Failed to acquire RNG guard: {e}"),
+                )
+            })?;
+            pe_good.sample(&mut rng, n_ei_candidates)
+        };
         let mut best_idx = 0usize;
         let mut best_val = f64::NEG_INFINITY;
         for (i, s) in samples_good.iter().enumerate() {
@@ -225,10 +247,10 @@ impl TpeSampler {
         trials: &[&'a rustuna_core::trial::PersistedTrial],
         direction: &Direction,
         gamma: usize,
-    ) -> (
+    ) -> Result<(
         Vec<&'a rustuna_core::trial::PersistedTrial>,
         Vec<&'a rustuna_core::trial::PersistedTrial>,
-    ) {
+    )> {
         let n = trials.len();
         assert!(
             gamma <= n,
@@ -236,10 +258,10 @@ impl TpeSampler {
         );
 
         if n == 0 {
-            return (Vec::new(), Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         if gamma == n {
-            return (trials.to_vec(), Vec::new());
+            return Ok((trials.to_vec(), Vec::new()));
         }
 
         fn value_for(t: &rustuna_core::trial::PersistedTrial) -> f64 {
@@ -249,6 +271,18 @@ impl TpeSampler {
             }
         }
 
+        // Since `usable_complete_trials` already filtered non-completed trials,
+        // we only check feasiblity of `trial`.
+        let feasibles_violations = trials
+            .iter()
+            .map(|trial| {
+                let constraints = trial.constraints()?;
+                let feasible = constraints.values().all(|x| *x <= 0.0);
+                let violation = constraints.values().filter(|&x| *x > 0.0).sum::<f64>();
+                Ok((feasible, violation))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
         // NaN trials must always land in `poor_trials` regardless of `direction`:
         // a NaN observation is a failed evaluation, and feeding it into the Parzen
         // estimator would corrupt the `good_trials` model. Using
@@ -257,7 +291,7 @@ impl TpeSampler {
         // good half. Treat NaN as strictly worse than any finite value, in both
         // directions.
         let mut idx: Vec<usize> = (0..n).collect();
-        idx.select_nth_unstable_by(gamma, |&i, &j| {
+        let compare_feasibles = |i, j| {
             let vi = value_for(trials[i]);
             let vj = value_for(trials[j]);
             match (vi.is_nan(), vj.is_nan()) {
@@ -274,6 +308,18 @@ impl TpeSampler {
                     }
                 }
             }
+        };
+        idx.select_nth_unstable_by(gamma, |&i, &j| {
+            let (feasible_i, violation_i) = feasibles_violations[i];
+            let (feasible_j, violation_j) = feasibles_violations[j];
+            match (feasible_i, feasible_j) {
+                (true, true) => compare_feasibles(i, j),
+                (true, false) => Ordering::Less,
+                (false, true) => Ordering::Greater,
+                (false, false) => violation_i
+                    .partial_cmp(&violation_j)
+                    .expect("NaN is already filtered."),
+            }
         });
 
         let mut good_trials = Vec::with_capacity(gamma);
@@ -284,7 +330,7 @@ impl TpeSampler {
         for &i in idx.iter().skip(gamma) {
             poor_trials.push(trials[i]);
         }
-        (good_trials, poor_trials)
+        Ok((good_trials, poor_trials))
     }
 
     fn gamma_for_single_objective(n: usize) -> usize {
@@ -401,7 +447,7 @@ impl TpeSampler {
 
 impl Sampler for TpeSampler {
     fn sample_independent(
-        &mut self,
+        &self,
         ctx: &Context,
         storage: Arc<RwLock<dyn Storage>>,
         name: &str,
@@ -440,7 +486,7 @@ impl Sampler for TpeSampler {
     }
 
     fn sample_joint(
-        &mut self,
+        &self,
         ctx: &Context,
         storage: Arc<RwLock<dyn Storage>>,
         search_space: &HashMap<String, Distribution>,
@@ -450,6 +496,12 @@ impl Sampler for TpeSampler {
         // all parameters through independent sampling.
         let multivariate = self.multivariate.unwrap_or(ctx.directions.len() == 1);
         if !multivariate {
+            return Ok(HashMap::new());
+        }
+        // A dynamic search space may have no parameters in common across completed
+        // trials. In that case, let each parameter fall back to independent sampling
+        // instead of trying to build a Parzen estimator with no observations.
+        if search_space.is_empty() {
             return Ok(HashMap::new());
         }
 
@@ -470,7 +522,7 @@ impl Sampler for TpeSampler {
     }
 
     fn after_trial(
-        &mut self,
+        &self,
         _ctx: &Context,
         _storage: Arc<RwLock<dyn Storage>>,
         _state_values: &TrialStateValues,
@@ -541,6 +593,36 @@ mod tests {
             .unwrap();
         let best_trial_number = get_best_trial(&study);
         assert!(best_trial_number.is_ok());
+    }
+
+    #[test]
+    fn test_dynamic_float_range_falls_back_to_independent_sampling() {
+        let storage = InMemoryStorage::new();
+        let directions = vec![Direction::Minimize];
+        let sampler = TpeSampler::from_config(TpeConfig {
+            multivariate: None,
+            n_startup_trials: 2,
+            seed: Some(42),
+        });
+        let study = create_study("dynamic-float-range", storage, sampler, directions).unwrap();
+
+        study
+            .optimize(
+                |mut t| {
+                    let x = if t.number % 2 == 0 {
+                        t.suggest_float("x", 0.0, 1.0)?
+                    } else {
+                        t.suggest_float("x", 0.5, 1.0)?
+                    };
+                    assert!((0.0..=1.0).contains(&x));
+                    if t.number % 2 == 1 {
+                        assert!(x >= 0.5);
+                    }
+                    Ok(vec![(x - 0.75).powi(2)])
+                },
+                6,
+            )
+            .unwrap();
     }
 
     #[test]
@@ -825,5 +907,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_single_objective_constraint() {
+        let storage = InMemoryStorage::new();
+        let directions = vec![Direction::Minimize];
+        let study = create_study(
+            "single-objective-constraint",
+            storage,
+            TpeSampler::seed_from_u64(0),
+            directions,
+        )
+        .unwrap();
+        let result = study.optimize(
+            |mut t| {
+                let x = t.suggest_float("x", -15.0, 15.0)?;
+                let c0 = x.powi(2) - 8.0;
+                t.set_constraints(HashMap::from([(String::from("c0"), c0)]))?;
+                Ok(vec![x.powi(2)])
+            },
+            100,
+        );
+        assert!(
+            result.is_ok(),
+            "Optimization should complete without panicking."
+        );
+    }
+
+    #[test]
+    fn test_multi_objective_constraint_with_few_feasible_trials() {
+        // Only a tiny slice of the search space is feasible, so the number of feasible
+        // trials stays below gamma. The good half then has to be padded with the least
+        // violating infeasible trials.
+        let storage = InMemoryStorage::new();
+        let directions = vec![Direction::Minimize, Direction::Minimize];
+        let study = create_study(
+            "multi-objective-constraint",
+            storage,
+            TpeSampler::seed_from_u64(0),
+            directions,
+        )
+        .unwrap();
+        let result = study.optimize(
+            |mut t| {
+                let x = t.suggest_float("x", 0.0, 1.0)?;
+                let y = t.suggest_float("y", 0.0, 1.0)?;
+                let c0 = if x < 0.02 { -1.0 } else { 1.0 };
+                t.set_constraints(HashMap::from([(String::from("c0"), c0)]))?;
+                Ok(vec![x, y])
+            },
+            200,
+        );
+        assert!(
+            result.is_ok(),
+            "Optimization should complete without panicking."
+        );
     }
 }

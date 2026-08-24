@@ -8,7 +8,7 @@ use std::sync::{Arc, RwLock};
 use crate::exception::err_to_exceptions;
 
 #[derive(Clone)]
-#[pyclass(name = "SQLite3TrialQueue")]
+#[pyclass(name = "SQLite3TrialQueue", from_py_object)]
 #[pyo3(module = "rustuna")]
 pub struct PySQLite3TrialQueue {
     pub queue: Arc<RwLock<SQLite3TrialQueue>>,

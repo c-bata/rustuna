@@ -267,6 +267,25 @@ impl InMemoryStorage {
         }
         discarded_if_none(trials[number as usize].as_ref())
     }
+
+    /// Updates trial timestamps when synchronizing an external storage into the cache.
+    pub fn set_trial_datetimes(
+        &mut self,
+        trial_id: u32,
+        datetime_start: Option<String>,
+        datetime_complete: Option<String>,
+    ) -> Result<()> {
+        let (study_id, trial_number) =
+            get_study_id_trial_number_by_trial_id(&self.trial_id_number_map, trial_id)?;
+        let trial = discarded_if_none(
+            get_mut_trials_by_study_id(&mut self.trials, study_id)?
+                .get_mut(trial_number as usize)
+                .and_then(Option::as_mut),
+        )?;
+        trial.datetime_start = datetime_start;
+        trial.datetime_complete = datetime_complete;
+        Ok(())
+    }
 }
 fn get_trials_by_study_id(
     all_trials: &HashMap<u32, Vec<Option<PersistedTrial>>>,

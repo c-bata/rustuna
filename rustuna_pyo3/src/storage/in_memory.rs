@@ -10,7 +10,7 @@ use crate::study::{PyDirection, PyPersistedStudy};
 use crate::trial::{PyPersistedTrial, PyTrialState};
 
 #[derive(Clone)]
-#[pyclass(name = "InMemoryStorage")]
+#[pyclass(name = "InMemoryStorage", from_py_object)]
 #[pyo3(module = "rustuna")]
 pub struct PyInMemoryStorage {
     pub(crate) binding: StorageBinding,

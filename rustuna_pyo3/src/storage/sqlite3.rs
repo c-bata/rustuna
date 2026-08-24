@@ -13,7 +13,7 @@ use crate::study::{PyDirection, PyPersistedStudy};
 use crate::trial::{PyPersistedTrial, PyTrialState};
 
 #[derive(Clone)]
-#[pyclass(name = "SQLite3Storage")]
+#[pyclass(name = "SQLite3Storage", from_py_object)]
 #[pyo3(module = "rustuna")]
 pub struct PySQLite3Storage {
     pub(crate) binding: StorageBinding,

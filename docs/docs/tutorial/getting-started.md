@@ -4,7 +4,7 @@ This guide will help you get started with Rustuna.
 
 ## Installation
 
-Rustuna supports Python 3.9 or newer. You can install Rustuna via pip. Unlike Optuna, Rustuna doesn't have runtime dependencies, not even on NumPy. This not only eliminates concerns of version conflicts for users but also significantly speeds up imports.
+Rustuna supports Python 3.11 or newer. You can install Rustuna via pip. Unlike Optuna, Rustuna doesn't have runtime dependencies, not even on NumPy. This not only eliminates concerns of version conflicts for users but also significantly speeds up imports.
 
 ```sh
 $ pip install rustuna

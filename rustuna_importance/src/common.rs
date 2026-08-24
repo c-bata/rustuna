@@ -144,7 +144,7 @@ pub(crate) fn resolve_target(
 
 pub(crate) fn get_filtered_trials(
     study: &Study,
-    target: &dyn Fn(&PersistedTrial) -> f64,
+    target: Option<&dyn Fn(&PersistedTrial) -> f64>,
 ) -> Result<Vec<PersistedTrial>> {
     let mut guard = study.storage.write().map_err(|e| {
         Error::with_reason(
@@ -158,7 +158,7 @@ pub(crate) fn get_filtered_trials(
         .iter()
         .flatten()
         .filter(|t| matches!(t.state_values, TrialStateValues::Complete(_)))
-        .filter(|t| target(t).is_finite())
+        .filter(|t| resolve_target(target)(t).is_finite())
         .cloned()
         .collect::<Vec<_>>();
     Ok(completed_trials)

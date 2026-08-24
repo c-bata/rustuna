@@ -10,7 +10,7 @@ use crate::study::{PyDirection, PyPersistedStudy};
 use crate::trial::{PyPersistedTrial, PyTrialState};
 
 #[derive(Clone)]
-#[pyclass(name = "ToPythonStorage")]
+#[pyclass(name = "ToPythonStorage", skip_from_py_object)]
 #[pyo3(module = "rustuna")]
 pub struct ToPythonStorage {
     pub(crate) binding: StorageBinding,

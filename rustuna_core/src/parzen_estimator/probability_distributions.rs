@@ -12,41 +12,41 @@ pub(crate) struct TruncNormDistributions {
     pub sigmas: Vec<f64>,
     pub low: f64,
     pub high: f64,
-    /// Precomputed: log_diff_cdf((low - mu_k) / sigma_k, (high - mu_k) / sigma_k)
-    ln_masses: Vec<f64>,
-    /// Precomputed: sigma_k.ln()
-    ln_sigmas: Vec<f64>,
+    /// Precomputed: NEG_HALF_LOG_2PI - ln(sigma_k) - ln_mass_k, i.e. every term that does not
+    /// depend on x. `-inf` for a kernel with no probability mass.
+    log_consts: Vec<f64>,
 }
 
 impl TruncNormDistributions {
     pub(crate) fn new(mus: Vec<f64>, sigmas: Vec<f64>, low: f64, high: f64) -> Self {
-        let ln_masses = mus
+        let log_consts = mus
             .iter()
             .zip(sigmas.iter())
             .map(|(&mu, &sigma)| {
-                truncnorm::log_diff_cdf((low - mu) / sigma, (high - mu) / sigma)
-                    .unwrap_or(f64::NEG_INFINITY)
+                let ln_mass = truncnorm::log_diff_cdf((low - mu) / sigma, (high - mu) / sigma)
+                    .unwrap_or(f64::NEG_INFINITY);
+                if ln_mass == f64::NEG_INFINITY {
+                    f64::NEG_INFINITY
+                } else {
+                    NEG_HALF_LOG_2PI - sigma.ln() - ln_mass
+                }
             })
             .collect();
-        let ln_sigmas = sigmas.iter().map(|&s| s.ln()).collect();
         Self {
             mus,
             sigmas,
             low,
             high,
-            ln_masses,
-            ln_sigmas,
+            log_consts,
         }
     }
 
-    /// Log PDF of the k-th kernel at x (without bounds check).
-    pub(crate) fn log_pdf(&self, x: f64, k: usize) -> f64 {
-        let ln_mass = self.ln_masses[k];
-        if ln_mass == f64::NEG_INFINITY {
-            return f64::NEG_INFINITY;
+    /// Adds each kernel's log PDF at x into `acc`.
+    pub(crate) fn accumulate_log_pdf(&self, x: f64, acc: &mut [f64]) {
+        for (k, a) in acc.iter_mut().enumerate() {
+            let z = (x - self.mus[k]) / self.sigmas[k];
+            *a += self.log_consts[k] - 0.5 * z * z;
         }
-        let z = (x - self.mus[k]) / self.sigmas[k];
-        NEG_HALF_LOG_2PI - 0.5 * z * z - self.ln_sigmas[k] - ln_mass
     }
 }
 
@@ -56,43 +56,44 @@ pub(crate) struct TruncLogNormDistributions {
     pub sigmas: Vec<f64>,
     pub low: f64,
     pub high: f64,
-    /// Precomputed: log_diff_cdf((ln(low) - mu_k) / sigma_k, (ln(high) - mu_k) / sigma_k)
-    ln_masses: Vec<f64>,
-    /// Precomputed: sigma_k.ln()
-    ln_sigmas: Vec<f64>,
+    /// Precomputed: NEG_HALF_LOG_2PI - ln(sigma_k) - ln_mass_k, i.e. every term that does not
+    /// depend on x. `-inf` for a kernel with no probability mass.
+    log_consts: Vec<f64>,
 }
 
 impl TruncLogNormDistributions {
     pub(crate) fn new(mus: Vec<f64>, sigmas: Vec<f64>, low: f64, high: f64) -> Self {
         let ln_low = low.ln();
         let ln_high = high.ln();
-        let ln_masses = mus
+        let log_consts = mus
             .iter()
             .zip(sigmas.iter())
             .map(|(&mu, &sigma)| {
-                truncnorm::log_diff_cdf((ln_low - mu) / sigma, (ln_high - mu) / sigma)
-                    .unwrap_or(f64::NEG_INFINITY)
+                let ln_mass =
+                    truncnorm::log_diff_cdf((ln_low - mu) / sigma, (ln_high - mu) / sigma)
+                        .unwrap_or(f64::NEG_INFINITY);
+                if ln_mass == f64::NEG_INFINITY {
+                    f64::NEG_INFINITY
+                } else {
+                    NEG_HALF_LOG_2PI - sigma.ln() - ln_mass
+                }
             })
             .collect();
-        let ln_sigmas = sigmas.iter().map(|&s| s.ln()).collect();
         Self {
             mus,
             sigmas,
             low,
             high,
-            ln_masses,
-            ln_sigmas,
+            log_consts,
         }
     }
 
-    /// Log PDF of the k-th kernel at ln_x (without bounds check, Jacobian excluded).
-    pub(crate) fn log_pdf(&self, ln_x: f64, k: usize) -> f64 {
-        let ln_mass = self.ln_masses[k];
-        if ln_mass == f64::NEG_INFINITY {
-            return f64::NEG_INFINITY;
+    /// Adds each kernel's log PDF at ln_x into `acc`.
+    pub(crate) fn accumulate_log_pdf(&self, ln_x: f64, acc: &mut [f64]) {
+        for (k, a) in acc.iter_mut().enumerate() {
+            let z = (ln_x - self.mus[k]) / self.sigmas[k];
+            *a += self.log_consts[k] - 0.5 * z * z - ln_x;
         }
-        let z = (ln_x - self.mus[k]) / self.sigmas[k];
-        NEG_HALF_LOG_2PI - 0.5 * z * z - self.ln_sigmas[k] - ln_mass
     }
 }
 
@@ -425,34 +426,13 @@ impl MixtureOfProductDistribution {
                     if x_val < d.low || x_val > d.high {
                         return f64::NEG_INFINITY;
                     }
-                    for (k, weight) in weighted_log_pdf.iter_mut().enumerate().take(n) {
-                        if *weight == f64::NEG_INFINITY {
-                            continue;
-                        }
-                        let lp = d.log_pdf(x_val, k);
-                        if lp == f64::NEG_INFINITY {
-                            *weight = f64::NEG_INFINITY;
-                        } else {
-                            *weight += lp;
-                        }
-                    }
+                    d.accumulate_log_pdf(x_val, &mut weighted_log_pdf);
                 }
                 Distributions::TruncLogNorm(d) => {
                     if x_val <= 0.0 || x_val < d.low || x_val > d.high {
                         return f64::NEG_INFINITY;
                     }
-                    let ln_x = x_val.ln();
-                    for (k, weight) in weighted_log_pdf.iter_mut().enumerate().take(n) {
-                        if *weight == f64::NEG_INFINITY {
-                            continue;
-                        }
-                        let lp = d.log_pdf(ln_x, k);
-                        if lp == f64::NEG_INFINITY {
-                            *weight = f64::NEG_INFINITY;
-                        } else {
-                            *weight += lp - ln_x;
-                        }
-                    }
+                    d.accumulate_log_pdf(x_val.ln(), &mut weighted_log_pdf);
                 }
                 Distributions::DiscreteTruncNorm(d) => {
                     for (k, weight) in weighted_log_pdf.iter_mut().enumerate().take(n) {

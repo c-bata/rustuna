@@ -135,6 +135,49 @@ pub(crate) trait CategoricalDistributionBuilder {
 pub(crate) struct DefaultNumericalDistributionBuilder;
 pub(crate) struct DefaultCategoricalDistributionBuilder;
 
+/// Each observation's larger distance to its two sorted neighbors, floored at `minsigma`, or
+/// `None` if fewer than two observations are given or some of them are outside the search space.
+///
+/// A neighbor nearer than `minsigma` cannot lift that floor, and binning at that width hides
+/// exactly those: within a bin only the extremes can have a farther neighbor, and it is the
+/// adjacent non-empty bin's extreme. The per-bin extremes therefore give every bandwidth.
+fn binned_sigmas(obs: &[f64], low: f64, high: f64) -> Option<Vec<f64>> {
+    if obs.len() < 2 {
+        // No inter-observation neighbor exists; the caller falls back to endpoint distances.
+        return None;
+    }
+
+    let n_bins = 100.min(obs.len() + 2);
+    let minsigma = (high - low) / n_bins as f64;
+
+    let mut bins = vec![(f64::INFINITY, 0_usize, f64::NEG_INFINITY, 0_usize); n_bins];
+    for (i, &v) in obs.iter().enumerate() {
+        if !(low..=high).contains(&v) {
+            // The observation is outside the search space.
+            return None;
+        }
+        let bin = &mut bins[(((v - low) / minsigma) as usize).min(n_bins - 1)];
+        if v < bin.0 {
+            (bin.0, bin.1) = (v, i);
+        }
+        if v >= bin.2 {
+            (bin.2, bin.3) = (v, i);
+        }
+    }
+
+    let mut sigmas = vec![minsigma; obs.len()];
+    let (mut prev_max, mut next_min) = (f64::NAN, f64::NAN);
+    for bin in bins.iter().filter(|b| b.0 <= b.2) {
+        sigmas[bin.1] = sigmas[bin.1].max(bin.0 - prev_max);
+        prev_max = bin.2;
+    }
+    for bin in bins.iter().rev().filter(|b| b.0 <= b.2) {
+        sigmas[bin.3] = sigmas[bin.3].max(next_min - bin.2);
+        next_min = bin.0;
+    }
+    Some(sigmas)
+}
+
 impl NumericalDistributionBuilder for DefaultNumericalDistributionBuilder {
     fn calculate_numerical_distribution(
         &self,
@@ -177,6 +220,10 @@ impl NumericalDistributionBuilder for DefaultNumericalDistributionBuilder {
         let mut sigmas = Vec::with_capacity(mus.len() + 1); // +1 for prior
         if mus.len() == 1 {
             // Case: prior only
+            sigmas.push(adj_high - adj_low);
+        } else if let Some(binned) = binned_sigmas(&mus[..mus.len() - 1], adj_low, adj_high) {
+            sigmas = binned;
+            // Sigma for prior
             sigmas.push(adj_high - adj_low);
         } else {
             let m = mus.len() - 1; // exclude prior
@@ -271,7 +318,41 @@ impl CategoricalDistributionBuilder for DefaultCategoricalDistributionBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
+    use rand::{Rng, SeedableRng};
+
+    #[test]
+    fn binned_sigmas_matches_a_naive_scan() {
+        // The larger distance to the two neighbors in sorted order, floored.
+        let naive = |obs: &[f64], minsigma: f64| {
+            let n = obs.len();
+            let mut order: Vec<usize> = (0..n).collect();
+            order.sort_by(|&a, &b| obs[a].total_cmp(&obs[b]));
+            let mut want = vec![0.0; n];
+            for (j, &i) in order.iter().enumerate() {
+                // A missing neighbor leaves NaN, which `max` discards.
+                let gap = |k: usize| (obs[order[k]] - obs[i]).abs();
+                let left = if j > 0 { gap(j - 1) } else { f64::NAN };
+                let right = if j + 1 < n { gap(j + 1) } else { f64::NAN };
+                want[i] = left.max(right).max(minsigma);
+            }
+            want
+        };
+
+        let (low, high) = (-10.0, 10.0);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        for m in [2, 3, 7, 64, 500] {
+            for spread in [1.0, 1e-4, 1e-9] {
+                // Endpoints, a duplicate, and a cluster far tighter than one bin, so that the
+                // neighbor rule and its tie-breaking are both exercised.
+                let mut obs: Vec<f64> = (0..m).map(|_| rng.gen_range(-spread..spread)).collect();
+                (obs[0], obs[m - 1], obs[m / 2]) = (low, high, obs[m / 3]);
+
+                let minsigma = (high - low) / (100.0_f64.min(2.0 + m as f64));
+                let binned = binned_sigmas(&obs, low, high).unwrap();
+                assert_eq!(binned, naive(&obs, minsigma), "m = {m}, spread = {spread}");
+            }
+        }
+    }
 
     #[test]
     fn build_parzen_estimator() {

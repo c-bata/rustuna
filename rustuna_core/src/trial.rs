@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use crate::attr::{category_labels_to_attrs, AttrKey, Attrs, CategoryLabel};
 use crate::distribution::Distribution;
@@ -23,10 +23,10 @@ pub struct Trial {
     pub datetime_complete: Option<String>,
     directions: Vec<Direction>,
     storage: Arc<RwLock<dyn Storage>>,
-    sampler: Arc<Mutex<dyn Sampler>>,
+    sampler: Arc<dyn Sampler>,
     joint_params: HashMap<String, (Distribution, f64)>,
     fixed_params: HashMap<String, CategoryLabel>,
-    cached_trial: PersistedTrial,
+    cached_user_attrs: HashMap<String, String>,
 }
 impl Trial {
     /// Constructs a trial from storage and sampler state.
@@ -39,13 +39,11 @@ impl Trial {
         datetime_complete: Option<String>,
         directions: Vec<Direction>,
         storage: Arc<RwLock<dyn Storage>>,
-        sampler: Arc<Mutex<dyn Sampler>>,
+        sampler: Arc<dyn Sampler>,
         joint_params: HashMap<String, (Distribution, f64)>,
         fixed_params: HashMap<String, CategoryLabel>,
     ) -> Self {
-        let mut cached_trial = PersistedTrial::new(trial_id, study_id, number);
-        cached_trial.datetime_start = datetime_start.clone();
-        cached_trial.datetime_complete = datetime_complete.clone();
+        let cached_user_attrs = HashMap::new();
         Trial {
             id: trial_id,
             study_id,
@@ -57,7 +55,7 @@ impl Trial {
             sampler,
             joint_params,
             fixed_params,
-            cached_trial,
+            cached_user_attrs,
         }
     }
 
@@ -108,14 +106,6 @@ impl Trial {
                 })?;
                 storage_guard.set_trial_param(self.id, name, distribution, internal_value)?;
                 drop(storage_guard);
-
-                self.cached_trial
-                    .internal_params
-                    .insert(name.to_string(), internal_value);
-                self.cached_trial
-                    .distributions
-                    .insert(name.to_string(), distribution.clone());
-
                 return Ok(internal_value);
             }
         }
@@ -141,15 +131,9 @@ impl Trial {
             trial_id: self.id,
             directions: self.directions.clone(),
         };
-        let mut sampler_guard = self.sampler.lock().map_err(|e| {
-            Error::with_reason(
-                ErrorKind::SamplerError,
-                format!("Failed to acquire sampler guard: {e}"),
-            )
-        })?;
         let param_value =
-            sampler_guard.sample_independent(&context, self.storage.clone(), name, distribution)?;
-        drop(sampler_guard);
+            self.sampler
+                .sample_independent(&context, self.storage.clone(), name, distribution)?;
 
         let mut storage_guard = self.storage.write().map_err(|e| {
             Error::with_reason(
@@ -159,14 +143,6 @@ impl Trial {
         })?;
         storage_guard.set_trial_param(self.id, name, distribution, param_value)?;
         drop(storage_guard);
-
-        self.cached_trial
-            .internal_params
-            .insert(name.to_string(), param_value);
-        self.cached_trial
-            .distributions
-            .insert(name.to_string(), distribution.clone());
-
         Ok(param_value)
     }
 
@@ -229,18 +205,11 @@ impl Trial {
     // making it difficult to cache the value.
     /// Returns a user attribute stored on the trial.
     pub fn get_user_attr(&mut self, key: &str) -> Option<&String> {
-        let key = AttrKey::User(key.into());
-        self.cached_trial.attrs.get(&key)
+        self.cached_user_attrs.get(key)
     }
     /// Returns user attributes stored on the trial.
     pub fn get_user_attrs(&self) -> HashMap<String, String> {
-        let mut user_attrs = HashMap::with_capacity(self.cached_trial.attrs.len());
-        for (key, value) in &self.cached_trial.attrs {
-            if let AttrKey::User(key) = key {
-                user_attrs.insert(key.to_string(), value.clone());
-            }
-        }
-        user_attrs
+        self.cached_user_attrs.clone()
     }
 
     /// Sets a single user attribute on the trial.
@@ -253,10 +222,10 @@ impl Trial {
         })?;
         let mut attrs = Attrs::new();
 
-        let key = AttrKey::User(key.into());
-        attrs.insert(key.clone(), value.clone());
+        let attr_key = AttrKey::User(key.into());
+        attrs.insert(attr_key.clone(), value.clone());
         guard.set_trial_attrs(self.id, attrs, false)?;
-        self.cached_trial.attrs.insert(key, value);
+        self.cached_user_attrs.insert(key.to_string(), value);
         Ok(())
     }
 
@@ -275,11 +244,7 @@ impl Trial {
         guard.set_trial_attrs(self.id, attrs, false)?;
         drop(guard);
 
-        for (key, value) in user_attrs {
-            self.cached_trial
-                .attrs
-                .insert(AttrKey::User(key.into()), value);
-        }
+        self.cached_user_attrs.extend(user_attrs);
         Ok(())
     }
 
@@ -287,13 +252,15 @@ impl Trial {
     pub fn set_constraints(&mut self, constraints: HashMap<String, f64>) -> Result<()> {
         let mut attrs = Attrs::with_capacity(constraints.len());
         for (key, value) in constraints {
+            if value.is_nan() {
+                return Err(Error::with_reason(
+                    ErrorKind::Unexpected,
+                    format!("The constraint value of '{key}' should not be NaN."),
+                ));
+            }
             let key_with_constraint_prefix = format!("{}:{}", CONSTRAINTS_KEY, key);
             attrs.insert(
                 AttrKey::System(key_with_constraint_prefix.as_str().into()),
-                value.to_string(),
-            );
-            self.cached_trial.attrs.insert(
-                AttrKey::System(key_with_constraint_prefix.into()),
                 value.to_string(),
             );
         }
@@ -517,7 +484,7 @@ mod tests {
     #[test]
     fn test_enqueue_and_suggest_float() -> Result<()> {
         let storage = Arc::new(RwLock::new(InMemoryStorage::new()));
-        let sampler = Arc::new(Mutex::new(RandomSampler::new()));
+        let sampler = Arc::new(RandomSampler::new());
         let directions = vec![Direction::Minimize];
         let study = create_study_with_arc("dummy", storage.clone(), sampler, directions)?;
 
@@ -534,7 +501,7 @@ mod tests {
     #[test]
     fn test_enqueue_and_suggest_int() -> Result<()> {
         let storage = Arc::new(RwLock::new(InMemoryStorage::new()));
-        let sampler = Arc::new(Mutex::new(RandomSampler::new()));
+        let sampler = Arc::new(RandomSampler::new());
         let directions = vec![Direction::Minimize];
         let study = create_study_with_arc("dummy", storage.clone(), sampler, directions)?;
 
@@ -551,7 +518,7 @@ mod tests {
     #[test]
     fn test_enqueue_fallback_on_out_of_range() -> Result<()> {
         let storage = Arc::new(RwLock::new(InMemoryStorage::new()));
-        let sampler = Arc::new(Mutex::new(RandomSampler::new()));
+        let sampler = Arc::new(RandomSampler::new());
         let directions = vec![Direction::Minimize];
         let study = create_study_with_arc("dummy", storage.clone(), sampler, directions)?;
 
@@ -568,7 +535,7 @@ mod tests {
     #[test]
     fn test_enqueue_mixed_with_normal_ask() -> Result<()> {
         let storage = Arc::new(RwLock::new(InMemoryStorage::new()));
-        let sampler = Arc::new(Mutex::new(RandomSampler::new()));
+        let sampler = Arc::new(RandomSampler::new());
         let directions = vec![Direction::Minimize];
         let study = create_study_with_arc("dummy", storage.clone(), sampler, directions)?;
 
@@ -591,7 +558,7 @@ mod tests {
     #[test]
     fn test_enqueue_unspecified_param_sampled() -> Result<()> {
         let storage = Arc::new(RwLock::new(InMemoryStorage::new()));
-        let sampler = Arc::new(Mutex::new(RandomSampler::new()));
+        let sampler = Arc::new(RandomSampler::new());
         let directions = vec![Direction::Minimize];
         let study = create_study_with_arc("dummy", storage.clone(), sampler, directions)?;
 
@@ -611,7 +578,7 @@ mod tests {
     #[test]
     fn test_trial_user_attr() -> Result<()> {
         let storage = Arc::new(RwLock::new(InMemoryStorage::new()));
-        let sampler = Arc::new(Mutex::new(RandomSampler::new()));
+        let sampler = Arc::new(RandomSampler::new());
         let directions = vec![Direction::Minimize];
         let study = create_study_with_arc("dummy", storage.clone(), sampler, directions)?;
 
@@ -650,7 +617,7 @@ mod tests {
     #[test]
     fn test_set_constraints() -> Result<()> {
         let storage = Arc::new(RwLock::new(InMemoryStorage::new()));
-        let sampler = Arc::new(Mutex::new(RandomSampler::new()));
+        let sampler = Arc::new(RandomSampler::new());
         let directions = vec![Direction::Minimize];
         let study = create_study_with_arc("dummy", storage.clone(), sampler, directions)?;
 
@@ -664,6 +631,25 @@ mod tests {
 
         let constraints = trials[0].constraints()?;
         assert_eq!(constraints, HashMap::from([(String::from("c0"), 10.0)]));
+        Ok(())
+    }
+
+    #[test]
+    fn test_set_constraints_with_nan() -> Result<()> {
+        let storage = Arc::new(RwLock::new(InMemoryStorage::new()));
+        let sampler = Arc::new(RandomSampler::new());
+        let directions = vec![Direction::Minimize];
+        let study = create_study_with_arc("dummy", storage.clone(), sampler, directions)?;
+
+        let mut trial = study.ask()?;
+        let _ = trial.suggest_float("x", -10.0, 10.0)?;
+        let constraints = HashMap::from([(String::from("c0"), f64::NAN)]);
+        let err = trial.set_constraints(constraints).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::Unexpected));
+
+        let _ = study.tell(trial.number, TrialStateValues::Complete(vec![0.0]));
+        let trials = study.get_trials()?;
+        assert!(trials[0].constraints()?.is_empty());
         Ok(())
     }
 }

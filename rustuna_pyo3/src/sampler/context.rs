@@ -5,7 +5,7 @@ use rustuna_core::sampler::Context as SamplerContext;
 use crate::study::PyDirection;
 
 #[derive(Clone)]
-#[pyclass(name = "SamplerContext")]
+#[pyclass(name = "SamplerContext", skip_from_py_object)]
 #[pyo3(module = "rustuna")]
 pub struct PySamplerContext {
     pub(crate) context: SamplerContext,

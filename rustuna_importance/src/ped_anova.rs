@@ -119,16 +119,16 @@ impl PedAnovaImportanceEvaluator {
         study: &Study,
         trials: &'a [PersistedTrial],
         quantile: f64,
-        target: &dyn Fn(&PersistedTrial) -> f64,
+        target: Option<&dyn Fn(&PersistedTrial) -> f64>,
     ) -> Vec<&'a PersistedTrial> {
         if quantile == 1.0 {
             return trials.iter().collect();
         }
-        let is_lower_better = study.directions[0] == Direction::Minimize;
+        let is_lower_better = target.is_some() || study.directions[0] == Direction::Minimize;
         let objective_values = trials
             .iter()
             .map(|t| {
-                let v = target(t);
+                let v = common::resolve_target(target)(t);
                 if is_lower_better {
                     v
                 } else {
@@ -196,8 +196,7 @@ impl ImportanceEvaluator for PedAnovaImportanceEvaluator {
         study: &Study,
         opts: ImportanceOptions,
     ) -> Result<HashMap<String, f64>> {
-        let target = common::resolve_target(opts.target);
-        let trials = common::get_filtered_trials(study, target)?;
+        let trials = common::get_filtered_trials(study, opts.target)?;
         common::ensure_target_for_multi_objective(&trials, opts.target)?;
         let params = resolve_params(&trials, opts.params)?;
 
@@ -206,9 +205,9 @@ impl ImportanceEvaluator for PedAnovaImportanceEvaluator {
         }
 
         let target_trials =
-            self.get_top_quantile_trials(study, &trials, self.target_quantile, target);
+            self.get_top_quantile_trials(study, &trials, self.target_quantile, opts.target);
         let region_trials =
-            self.get_top_quantile_trials(study, &trials, self.region_quantile, target);
+            self.get_top_quantile_trials(study, &trials, self.region_quantile, opts.target);
         if target_trials.is_empty() {
             return Ok(params.into_iter().map(|name| (name, 0.0)).collect());
         }

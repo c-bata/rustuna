@@ -404,7 +404,7 @@ impl CachedStorageBackend for PyCachedStorageBackend {
 }
 
 #[derive(Clone)]
-#[pyclass(name = "CachedStorage")]
+#[pyclass(name = "CachedStorage", from_py_object)]
 #[pyo3(module = "rustuna")]
 pub struct PyCachedStorage {
     pub(crate) binding: StorageBinding,

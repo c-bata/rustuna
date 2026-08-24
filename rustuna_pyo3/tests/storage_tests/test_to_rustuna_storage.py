@@ -59,6 +59,22 @@ def test_resume_optimization():
     assert len(optuna_study.trials) == 30
 
 
+def test_trial_datetimes_are_preserved_in_rustuna_storage_cache():
+    optuna_storage = optuna.storages.InMemoryStorage()
+    optuna_study = optuna.create_study(storage=optuna_storage)
+    optuna_study.optimize(lambda _: 1.0, n_trials=1)
+
+    rustuna_study = rustuna.load_study(
+        study_name=optuna_study.study_name,
+        storage=ToRustunaStorage(optuna_storage),
+    )
+
+    optuna_trial = optuna_study.trials[0]
+    rustuna_trial = rustuna_study.trials[0]
+    assert rustuna_trial.datetime_start == optuna_trial.datetime_start
+    assert rustuna_trial.datetime_complete == optuna_trial.datetime_complete
+
+
 def _run_optimize(sqlite3_filepath: str) -> None:
     optuna_storage = optuna.storages.RDBStorage(f"sqlite:///{sqlite3_filepath}")
     storage = ToRustunaStorage(optuna_storage)

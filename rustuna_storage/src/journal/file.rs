@@ -48,6 +48,16 @@ pub trait JournalFileLock: Send + Sync {
     fn release(&self) -> Result<()>;
 }
 
+#[cfg(unix)]
+fn default_journal_file_lock(file_path: &Path) -> Box<dyn JournalFileLock> {
+    Box::new(JournalFileSymlinkLock::new(file_path))
+}
+
+#[cfg(not(unix))]
+fn default_journal_file_lock(file_path: &Path) -> Box<dyn JournalFileLock> {
+    Box::new(JournalFileOpenLock::new(file_path))
+}
+
 /// File-based backend for [`super::storage::JournalStorage`].
 ///
 /// Logs are appended as newline-delimited JSON records. A pluggable lock implementation is used
@@ -71,7 +81,7 @@ impl JournalFileBackend {
             File::create(&file_path)
                 .map_err(|e| Error::with_reason(ErrorKind::StorageError, e.to_string()))?;
         }
-        let lock = lock.unwrap_or_else(|| Box::new(JournalFileSymlinkLock::new(&file_path)));
+        let lock = lock.unwrap_or_else(|| default_journal_file_lock(&file_path));
         Ok(JournalFileBackend {
             file_path,
             lock,
@@ -222,11 +232,13 @@ impl JournalBackend for JournalFileBackend {
 /// Similar to Optuna's symlink-based journal lock, this variant is intended for environments
 /// where symlink creation provides a more portable inter-process exclusion mechanism than
 /// exclusive file creation.
+#[cfg(unix)]
 pub struct JournalFileSymlinkLock {
     lock_target_file: PathBuf,
     lock_file: PathBuf,
 }
 
+#[cfg(unix)]
 impl JournalFileSymlinkLock {
     /// Creates a symlink-based lock next to the journal file.
     pub fn new(filepath: impl AsRef<Path>) -> Self {
@@ -238,6 +250,7 @@ impl JournalFileSymlinkLock {
     }
 }
 
+#[cfg(unix)]
 impl JournalFileLock for JournalFileSymlinkLock {
     /// Acquires the lock by creating a symlink in a blocking retry loop.
     fn acquire(&self) -> Result<()> {

@@ -9,7 +9,7 @@ use rustuna_core::attr::{get_category_labels, Attrs, CategoryLabel};
 use rustuna_core::distribution::Distribution;
 
 #[derive(Clone, Debug)]
-#[pyclass(name = "Distribution")]
+#[pyclass(name = "Distribution", from_py_object)]
 #[pyo3(module = "rustuna")]
 pub struct PyDistribution {
     pub distribution: Distribution,

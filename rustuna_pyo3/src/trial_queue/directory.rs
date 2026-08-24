@@ -8,7 +8,7 @@ use std::sync::{Arc, RwLock};
 use crate::exception::err_to_exceptions;
 
 #[derive(Clone)]
-#[pyclass(name = "DirectoryTrialQueue")]
+#[pyclass(name = "DirectoryTrialQueue", from_py_object)]
 #[pyo3(module = "rustuna")]
 pub struct PyDirectoryTrialQueue {
     pub queue: Arc<RwLock<DirectoryTrialQueue>>,

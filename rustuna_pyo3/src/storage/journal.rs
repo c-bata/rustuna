@@ -4,7 +4,7 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use rustuna_core::storage::Storage;
-use rustuna_storage::journal::file::{JournalFileBackend, JournalFileSymlinkLock};
+use rustuna_storage::journal::file::JournalFileBackend;
 use rustuna_storage::journal::storage::{JournalStorage, JournalStorageOptions};
 
 use crate::distribution::PyDistribution;
@@ -13,7 +13,7 @@ use crate::study::{PyDirection, PyPersistedStudy};
 use crate::trial::{PyPersistedTrial, PyTrialState};
 
 #[derive(Clone)]
-#[pyclass(name = "JournalFileStorage")]
+#[pyclass(name = "JournalFileStorage", from_py_object)]
 #[pyo3(module = "rustuna")]
 pub struct PyJournalFileStorage {
     pub(crate) binding: StorageBinding,
@@ -30,9 +30,7 @@ impl PyJournalFileStorage {
     #[new]
     #[pyo3(signature = (file_path, *, apply_discard = false))]
     fn py_new(file_path: &str, apply_discard: bool) -> PyResult<Self> {
-        // TODO(c-bata): Add lock_obj argument to use JournalFileOpenLock.
-        let lock_obj = Box::new(JournalFileSymlinkLock::new(file_path));
-        let backend = JournalFileBackend::new(file_path, Some(lock_obj)).map_err(|e| {
+        let backend = JournalFileBackend::new(file_path, None).map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to create journal file: {e:?}"))
         })?;
         let storage = JournalStorage::new_with_options(

@@ -174,7 +174,7 @@ pub fn py_create_trial(
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[pyclass(name = "TrialState", eq, eq_int)]
+#[pyclass(name = "TrialState", eq, eq_int, from_py_object)]
 #[pyo3(module = "rustuna")]
 #[allow(clippy::upper_case_acronyms)]
 pub enum PyTrialState {
@@ -385,9 +385,9 @@ impl PyTrial {
         let constraints: HashMap<String, f64> =
             Python::attach(|py| constraints.bind(py).extract())?;
 
-        self.trial.set_constraints(constraints).map_err(|e| {
-            PyRuntimeError::new_err(format!("Fialed to set constraints: {:?}", e.kind))
-        })?;
+        self.trial
+            .set_constraints(constraints)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to set constraints: {e}")))?;
 
         Ok(())
     }
