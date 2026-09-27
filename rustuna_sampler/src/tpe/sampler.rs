@@ -39,9 +39,6 @@ impl Default for TpeBuilder {
 }
 impl TpeBuilder {
     /// Creates a builder with the default configuration.
-    ///
-    /// The default configuration selects multivariate TPE automatically and uses random
-    /// sampling for the first 10 completed trials.
     pub fn new() -> Self {
         Self {
             multivariate: None,
@@ -50,12 +47,9 @@ impl TpeBuilder {
         }
     }
 
-    /// Sets whether to use multivariate TPE for joint suggestions over the inferred search
-    /// space.
-    ///
-    /// `true` forces multivariate (joint) sampling and `false` forces independent (univariate)
-    /// sampling. When left unset, the sampler selects automatically, matching Optuna:
-    /// multivariate for single-objective studies and independent for multi-objective studies.
+    /// Sets whether to force multivariate (joint) sampling. When unset, it is selected
+    /// automatically (multivariate for single-objective, independent for multi-objective,
+    /// matching Optuna).
     pub fn multivariate(self, multivariate: bool) -> Self {
         Self {
             multivariate: Some(multivariate),
@@ -63,8 +57,7 @@ impl TpeBuilder {
         }
     }
 
-    /// Sets the number of completed trials to collect before switching from random sampling
-    /// to TPE.
+    /// Sets the number of completed trials before switching from random sampling to TPE.
     pub fn n_startup_trials(self, n_startup_trials: usize) -> Self {
         Self {
             n_startup_trials,
@@ -72,7 +65,6 @@ impl TpeBuilder {
         }
     }
 
-    /// Sets the RNG seed for reproducible sampling.
     pub fn seed(self, seed: u64) -> Self {
         Self {
             seed: Some(seed),
@@ -80,7 +72,6 @@ impl TpeBuilder {
         }
     }
 
-    /// Builds the sampler.
     pub fn build(self) -> TpeSampler {
         let mut rng = match self.seed {
             Some(seed) => StdRng::seed_from_u64(seed),
@@ -240,18 +231,6 @@ impl Default for TpeSampler {
 }
 impl TpeSampler {
     /// Returns a builder for creating a sampler with an explicit configuration.
-    ///
-    /// This is the counterpart of [`std::thread::Builder`]: settings are configured by
-    /// chaining methods and the sampler is created with [`TpeBuilder::build`].
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use rustuna_sampler::tpe::TpeSampler;
-    ///
-    /// let sampler = TpeSampler::builder().n_startup_trials(20).seed(42).build();
-    /// # let _ = sampler;
-    /// ```
     pub fn builder() -> TpeBuilder {
         TpeBuilder::new()
     }

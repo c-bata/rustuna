@@ -102,10 +102,6 @@ impl Default for NsgaiiBuilder {
 }
 impl NsgaiiBuilder {
     /// Creates a builder with the default configuration.
-    ///
-    /// The default configuration has a population size of 50, no explicit mutation
-    /// probability, a crossover probability of 0.9, a swapping probability of 0.5, and
-    /// no RNG seed.
     pub fn new() -> Self {
         Self {
             population_size: 50,
@@ -116,7 +112,6 @@ impl NsgaiiBuilder {
         }
     }
 
-    /// Sets the number of individuals (trials) in a generation.
     pub fn population_size(self, population_size: usize) -> Self {
         Self {
             population_size,
@@ -124,9 +119,8 @@ impl NsgaiiBuilder {
         }
     }
 
-    /// Sets the probability of mutating each parameter when generating a child.
-    ///
-    /// When left unset, the automatic default `1 / n_params` is used.
+    /// Sets the per-parameter mutation probability. When unset, the automatic default
+    /// `1 / n_params` is used.
     pub fn mutation_prob(self, mutation_prob: f64) -> Self {
         Self {
             mutation_prob: Some(mutation_prob),
@@ -134,8 +128,6 @@ impl NsgaiiBuilder {
         }
     }
 
-    /// Sets the probability of generating a child by crossover rather than cloning one
-    /// parent.
     pub fn crossover_prob(self, crossover_prob: f64) -> Self {
         Self {
             crossover_prob,
@@ -143,8 +135,6 @@ impl NsgaiiBuilder {
         }
     }
 
-    /// Sets the probability of taking each parameter from the second parent during
-    /// crossover.
     pub fn swapping_prob(self, swapping_prob: f64) -> Self {
         Self {
             swapping_prob,
@@ -152,7 +142,6 @@ impl NsgaiiBuilder {
         }
     }
 
-    /// Sets the RNG seed for reproducible sampling.
     pub fn seed(self, seed: u64) -> Self {
         Self {
             seed: Some(seed),
@@ -160,7 +149,6 @@ impl NsgaiiBuilder {
         }
     }
 
-    /// Builds the sampler.
     pub fn build(self) -> NSGAIISampler {
         let rng = match self.seed {
             Some(seed) => StdRng::seed_from_u64(seed),
@@ -179,18 +167,6 @@ impl NsgaiiBuilder {
 
 impl NSGAIISampler {
     /// Returns a builder for creating a sampler with an explicit configuration.
-    ///
-    /// This is the counterpart of [`std::thread::Builder`]: settings are configured by
-    /// chaining methods and the sampler is created with [`NsgaiiBuilder::build`].
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use rustuna_sampler::nsgaii::NSGAIISampler;
-    ///
-    /// let sampler = NSGAIISampler::builder().population_size(100).seed(42).build();
-    /// # let _ = sampler;
-    /// ```
     pub fn builder() -> NsgaiiBuilder {
         NsgaiiBuilder::new()
     }
