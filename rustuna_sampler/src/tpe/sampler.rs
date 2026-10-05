@@ -19,9 +19,9 @@ use rustuna_core::{Error, ErrorKind};
 /// # Examples
 ///
 /// ```
-/// use rustuna_sampler::tpe::TpeSampler;
+/// use rustuna_sampler::tpe::TpeBuilder;
 ///
-/// let sampler = TpeSampler::builder()
+/// let sampler = TpeBuilder::new()
 ///     .n_startup_trials(20)
 ///     .multivariate(true)
 ///     .seed(42)
@@ -230,18 +230,13 @@ impl Default for TpeSampler {
     }
 }
 impl TpeSampler {
-    /// Returns a builder for creating a sampler with an explicit configuration.
-    pub fn builder() -> TpeBuilder {
-        TpeBuilder::new()
-    }
-
     /// Creates a sampler with the default configuration.
     ///
     /// The default configuration selects multivariate TPE automatically (multivariate for
     /// single-objective, independent for multi-objective, matching Optuna) and uses random
     /// sampling for the first 10 completed trials.
     pub fn new() -> TpeSampler {
-        Self::builder().build()
+        TpeBuilder::new().build()
     }
 
     /// Creates a reproducibly seeded sampler.
@@ -249,7 +244,7 @@ impl TpeSampler {
     /// This is equivalent to [`TpeSampler::new`] but initializes the internal random number
     /// generator from the provided seed.
     pub fn seed_from_u64(seed: u64) -> TpeSampler {
-        Self::builder().seed(seed).build()
+        TpeBuilder::new().seed(seed).build()
     }
 
     fn sample(
@@ -810,7 +805,7 @@ mod tests {
     fn test_dynamic_float_range_falls_back_to_independent_sampling() {
         let storage = InMemoryStorage::new();
         let directions = vec![Direction::Minimize];
-        let sampler = TpeSampler::builder().n_startup_trials(2).seed(42).build();
+        let sampler = TpeBuilder::new().n_startup_trials(2).seed(42).build();
         let study = create_study("dynamic-float-range", storage, sampler, directions).unwrap();
 
         study
@@ -1289,7 +1284,7 @@ mod tests {
             vec![Direction::Minimize],
         )
         .unwrap();
-        let probe = TpeSampler::builder().n_startup_trials(1).seed(0).build();
+        let probe = TpeBuilder::new().n_startup_trials(1).seed(0).build();
         let ctx = |trial_id: u32| Context {
             study_id: study.id,
             directions: vec![Direction::Minimize],
@@ -1356,7 +1351,7 @@ mod tests {
         use rustuna_core::attr::{AttrKey, Attrs};
 
         let storage = InMemoryStorage::new();
-        let sampler = TpeSampler::builder().n_startup_trials(1).seed(0).build();
+        let sampler = TpeBuilder::new().n_startup_trials(1).seed(0).build();
         let study = create_study(
             "bad-constraints",
             storage,

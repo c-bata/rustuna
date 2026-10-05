@@ -7,7 +7,7 @@ use pyo3::Py;
 
 use rustuna_core::sampler::Sampler;
 use rustuna_core::trial::TrialStateValues;
-use rustuna_sampler::nsgaii::NSGAIISampler;
+use rustuna_sampler::nsgaii::{NSGAIISampler, NsgaiiBuilder};
 
 use crate::distribution::PyDistribution;
 use crate::sampler::{extract_storage, PySamplerContext};
@@ -30,7 +30,7 @@ impl PyNSGAIISampler {
         crossover_prob: f64,
         swapping_prob: f64,
     ) -> PyResult<Self> {
-        let mut builder = NSGAIISampler::builder()
+        let mut builder = NsgaiiBuilder::new()
             .population_size(population_size)
             .crossover_prob(crossover_prob)
             .swapping_prob(swapping_prob);

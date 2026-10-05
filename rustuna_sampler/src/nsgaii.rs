@@ -78,9 +78,9 @@ impl Default for NSGAIISampler {
 /// # Examples
 ///
 /// ```
-/// use rustuna_sampler::nsgaii::NSGAIISampler;
+/// use rustuna_sampler::nsgaii::NsgaiiBuilder;
 ///
-/// let sampler = NSGAIISampler::builder()
+/// let sampler = NsgaiiBuilder::new()
 ///     .population_size(100)
 ///     .mutation_prob(0.1)
 ///     .crossover_prob(0.9)
@@ -166,11 +166,6 @@ impl NsgaiiBuilder {
 }
 
 impl NSGAIISampler {
-    /// Returns a builder for creating a sampler with an explicit configuration.
-    pub fn builder() -> NsgaiiBuilder {
-        NsgaiiBuilder::new()
-    }
-
     /// Creates an NSGA-II sampler.
     ///
     /// `population_size` is the number of individuals retained in each generation.
@@ -184,7 +179,7 @@ impl NSGAIISampler {
         crossover_prob: f64,
         swapping_prob: f64,
     ) -> NSGAIISampler {
-        let mut builder = NSGAIISampler::builder()
+        let mut builder = NsgaiiBuilder::new()
             .population_size(population_size)
             .crossover_prob(crossover_prob)
             .swapping_prob(swapping_prob);
@@ -204,7 +199,7 @@ impl NSGAIISampler {
         crossover_prob: f64,
         swapping_prob: f64,
     ) -> NSGAIISampler {
-        let mut builder = NSGAIISampler::builder()
+        let mut builder = NsgaiiBuilder::new()
             .population_size(population_size)
             .crossover_prob(crossover_prob)
             .swapping_prob(swapping_prob)
