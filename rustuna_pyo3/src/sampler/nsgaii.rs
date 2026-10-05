@@ -7,7 +7,7 @@ use pyo3::Py;
 
 use rustuna_core::sampler::Sampler;
 use rustuna_core::trial::TrialStateValues;
-use rustuna_sampler::nsgaii::{NSGAIISampler, NsgaiiBuilder};
+use rustuna_sampler::nsgaii::{NsgaiiBuilder, NsgaiiSampler};
 
 use crate::distribution::PyDistribution;
 use crate::sampler::{extract_storage, PySamplerContext};
@@ -16,11 +16,11 @@ use crate::trial::PyTrialState;
 #[derive(Clone)]
 #[pyclass(name = "NSGAIISampler", from_py_object)]
 #[pyo3(module = "rustuna")]
-pub struct PyNSGAIISampler {
-    pub sampler: Arc<NSGAIISampler>,
+pub struct PyNsgaiiSampler {
+    pub sampler: Arc<NsgaiiSampler>,
 }
 #[pymethods]
-impl PyNSGAIISampler {
+impl PyNsgaiiSampler {
     #[new]
     #[pyo3(signature = (*, seed = None, population_size = 50, mutation_prob = None, crossover_prob = 0.9, swapping_prob = 0.5))]
     fn py_new(
@@ -41,7 +41,7 @@ impl PyNSGAIISampler {
             builder = builder.mutation_prob(mutation_prob);
         }
         let rs_sampler = builder.build();
-        Ok(PyNSGAIISampler {
+        Ok(PyNsgaiiSampler {
             sampler: Arc::new(rs_sampler),
         })
     }

@@ -35,14 +35,14 @@ const PARENT_CACHE_KEY_PREFIX: &str = "NSGAIISampler:parent:";
 /// use rustuna_core::storage::InMemoryStorage;
 /// use rustuna_core::study::{create_study, Direction};
 /// use rustuna_core::Result;
-/// use rustuna_sampler::nsgaii::NSGAIISampler;
+/// use rustuna_sampler::nsgaii::NsgaiiSampler;
 ///
 /// fn main() -> Result<()> {
 ///     let storage = InMemoryStorage::new();
 ///     let study = create_study(
 ///         "bi-objective",
 ///         storage,
-///         NSGAIISampler::new(50, None, 0.9, 0.5),
+///         NsgaiiSampler::new(50, None, 0.9, 0.5),
 ///         vec![Direction::Minimize, Direction::Maximize],
 ///     )?;
 ///
@@ -57,7 +57,7 @@ const PARENT_CACHE_KEY_PREFIX: &str = "NSGAIISampler:parent:";
 ///     Ok(())
 /// }
 /// ```
-pub struct NSGAIISampler {
+pub struct NsgaiiSampler {
     rng: Mutex<StdRng>,
     population_size: usize,
     mutation_prob: Option<f64>,
@@ -67,13 +67,13 @@ pub struct NSGAIISampler {
     /// Updated incrementally in `after_trial` so `sample_joint` does not scan all trials every time.
     generation_to_numbers: RwLock<HashMap<u32, Vec<u32>>>,
 }
-impl Default for NSGAIISampler {
+impl Default for NsgaiiSampler {
     fn default() -> Self {
         Self::new(50, None, 0.9, 0.5)
     }
 }
 
-/// Builder for [`NSGAIISampler`], following the API style of [`std::thread::Builder`].
+/// Builder for [`NsgaiiSampler`], following the API style of [`std::thread::Builder`].
 ///
 /// # Examples
 ///
@@ -149,12 +149,12 @@ impl NsgaiiBuilder {
         }
     }
 
-    pub fn build(self) -> NSGAIISampler {
+    pub fn build(self) -> NsgaiiSampler {
         let rng = match self.seed {
             Some(seed) => StdRng::seed_from_u64(seed),
             None => StdRng::from_seed(Default::default()),
         };
-        NSGAIISampler {
+        NsgaiiSampler {
             rng: Mutex::new(rng),
             population_size: self.population_size,
             mutation_prob: self.mutation_prob,
@@ -165,7 +165,7 @@ impl NsgaiiBuilder {
     }
 }
 
-impl NSGAIISampler {
+impl NsgaiiSampler {
     /// Creates an NSGA-II sampler.
     ///
     /// `population_size` is the number of individuals retained in each generation.
@@ -178,7 +178,7 @@ impl NSGAIISampler {
         mutation_prob: Option<f64>,
         crossover_prob: f64,
         swapping_prob: f64,
-    ) -> NSGAIISampler {
+    ) -> NsgaiiSampler {
         let mut builder = NsgaiiBuilder::new()
             .population_size(population_size)
             .crossover_prob(crossover_prob)
@@ -190,7 +190,7 @@ impl NSGAIISampler {
     }
     /// Creates a reproducibly seeded NSGA-II sampler.
     ///
-    /// This is equivalent to [`NSGAIISampler::new`] but initializes the internal random number
+    /// This is equivalent to [`NsgaiiSampler::new`] but initializes the internal random number
     /// generator from the provided seed.
     pub fn seed_from_u64(
         seed: u64,
@@ -198,7 +198,7 @@ impl NSGAIISampler {
         mutation_prob: Option<f64>,
         crossover_prob: f64,
         swapping_prob: f64,
-    ) -> NSGAIISampler {
+    ) -> NsgaiiSampler {
         let mut builder = NsgaiiBuilder::new()
             .population_size(population_size)
             .crossover_prob(crossover_prob)
@@ -408,7 +408,7 @@ impl NSGAIISampler {
         Ok(child)
     }
 }
-impl Sampler for NSGAIISampler {
+impl Sampler for NsgaiiSampler {
     fn sample_independent(
         &self,
         _ctx: &Context,
@@ -863,7 +863,7 @@ mod tests {
         let study = create_study(
             "simple-quadratic",
             storage,
-            NSGAIISampler::new(2, None, 1.0, 1.0),
+            NsgaiiSampler::new(2, None, 1.0, 1.0),
             directions,
         )
         .unwrap();
@@ -890,7 +890,7 @@ mod tests {
         let study = create_study(
             "single-value-test",
             storage,
-            NSGAIISampler::new(3, None, 0.9, 0.5),
+            NsgaiiSampler::new(3, None, 0.9, 0.5),
             directions,
         )
         .unwrap();
@@ -949,7 +949,7 @@ mod tests {
         let study = create_study(
             "constraints",
             storage,
-            NSGAIISampler::new(2, None, 1.0, 1.0),
+            NsgaiiSampler::new(2, None, 1.0, 1.0),
             directions,
         )
         .unwrap();
@@ -978,7 +978,7 @@ mod tests {
         let study = create_study(
             "uncompleted_trial",
             storage,
-            NSGAIISampler::new(2, None, 1.0, 1.0),
+            NsgaiiSampler::new(2, None, 1.0, 1.0),
             directions,
         )
         .unwrap();
@@ -1013,7 +1013,7 @@ mod tests {
             let study = create_study(
                 "reproducibility-test",
                 storage,
-                NSGAIISampler::seed_from_u64(42, 10, None, 0.9, 0.5),
+                NsgaiiSampler::seed_from_u64(42, 10, None, 0.9, 0.5),
                 directions,
             )
             .unwrap();
@@ -1062,7 +1062,7 @@ mod tests {
         let study = create_study(
             "parent-cache-test",
             storage,
-            NSGAIISampler::new(2, None, 1.0, 1.0),
+            NsgaiiSampler::new(2, None, 1.0, 1.0),
             directions,
         )
         .unwrap();
@@ -1096,7 +1096,7 @@ mod tests {
         let study = create_study(
             "parent-cache-restart",
             storage,
-            NSGAIISampler::new(2, None, 1.0, 1.0),
+            NsgaiiSampler::new(2, None, 1.0, 1.0),
             directions,
         )
         .unwrap();
@@ -1126,7 +1126,7 @@ mod tests {
         assert!(!cached_ids.is_empty(), "cache should exist before restart");
 
         // Create a new sampler instance (simulating restart) and run more trials.
-        let new_sampler = NSGAIISampler::new(2, None, 1.0, 1.0);
+        let new_sampler = NsgaiiSampler::new(2, None, 1.0, 1.0);
         let resumed = rustuna_core::study::Study::from_id(
             study.id,
             std::sync::Arc::clone(&study.storage),
@@ -1154,7 +1154,7 @@ mod tests {
         let study = create_study(
             "parent-cache-invalid",
             InMemoryStorage::new(),
-            NSGAIISampler::new(2, None, 1.0, 1.0),
+            NsgaiiSampler::new(2, None, 1.0, 1.0),
             vec![Direction::Minimize, Direction::Minimize],
         )
         .unwrap();
@@ -1168,7 +1168,7 @@ mod tests {
             )
             .unwrap();
 
-        let cache_key = NSGAIISampler::parent_cache_key(1);
+        let cache_key = NsgaiiSampler::parent_cache_key(1);
         {
             let mut attrs = Attrs::new();
             attrs.insert(cache_key.clone(), "[]".to_string());
@@ -1183,7 +1183,7 @@ mod tests {
         let resumed = rustuna_core::study::Study::from_id(
             study.id,
             Arc::clone(&study.storage),
-            Arc::new(NSGAIISampler::new(2, None, 1.0, 1.0)),
+            Arc::new(NsgaiiSampler::new(2, None, 1.0, 1.0)),
         )
         .unwrap();
         resumed.ask().unwrap();
@@ -1201,7 +1201,7 @@ mod tests {
     #[test]
     fn test_parent_population_cache_preserves_parent_order() {
         let completed_trial_numbers_by_id = HashMap::from([(10, 2), (20, 0), (30, 1)]);
-        let population_numbers = NSGAIISampler::decode_parent_population_numbers(
+        let population_numbers = NsgaiiSampler::decode_parent_population_numbers(
             |trial_id| Ok(completed_trial_numbers_by_id.get(&trial_id).copied()),
             "[10,20,30]",
             3,
@@ -1217,7 +1217,7 @@ mod tests {
         let study = create_study(
             "parent-cache-population-size",
             InMemoryStorage::new(),
-            NSGAIISampler::new(2, None, 1.0, 1.0),
+            NsgaiiSampler::new(2, None, 1.0, 1.0),
             vec![Direction::Minimize, Direction::Minimize],
         )
         .unwrap();
@@ -1234,7 +1234,7 @@ mod tests {
         let resumed = rustuna_core::study::Study::from_id(
             study.id,
             Arc::clone(&study.storage),
-            Arc::new(NSGAIISampler::new(3, None, 1.0, 1.0)),
+            Arc::new(NsgaiiSampler::new(3, None, 1.0, 1.0)),
         )
         .unwrap();
         let generation_zero_trial = resumed.ask().unwrap();
@@ -1250,7 +1250,7 @@ mod tests {
             .storage
             .write()
             .unwrap()
-            .get_study_attr(resumed.id, NSGAIISampler::parent_cache_key(1))
+            .get_study_attr(resumed.id, NsgaiiSampler::parent_cache_key(1))
             .unwrap();
         let parent_ids: Vec<u32> = serde_json::from_str(&encoded).unwrap();
         assert_eq!(parent_ids.len(), 3);

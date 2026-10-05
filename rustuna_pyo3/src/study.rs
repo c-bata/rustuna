@@ -20,7 +20,7 @@ use crate::attrs::pyobj_to_attrs;
 use crate::attrs::{convert_pydict_to_fixed_params, pyobj_to_attrs_with_kind, AttrKind};
 use crate::exception::err_to_exceptions;
 use crate::sampler::cmaes::PyCmaEsSampler;
-use crate::sampler::nsgaii::PyNSGAIISampler;
+use crate::sampler::nsgaii::PyNsgaiiSampler;
 use crate::sampler::random::PyRandomSampler;
 use crate::sampler::to_rust::ToRustSampler;
 use crate::sampler::tpe::PyTpeSampler;
@@ -229,7 +229,7 @@ fn resolve_sampler_pyobj(
     let sampler_ref = sampler.bind(py);
     if let Ok(py_tpe_sampler) = sampler_ref.extract::<PyTpeSampler>() {
         Ok((py_tpe_sampler.sampler.clone(), sampler_pyobj))
-    } else if let Ok(py_nsgaii_sampler) = sampler_ref.extract::<PyNSGAIISampler>() {
+    } else if let Ok(py_nsgaii_sampler) = sampler_ref.extract::<PyNsgaiiSampler>() {
         Ok((py_nsgaii_sampler.sampler.clone(), sampler_pyobj))
     } else if let Ok(py_cmaes_sampler) = sampler_ref.extract::<PyCmaEsSampler>() {
         Ok((py_cmaes_sampler.sampler.clone(), sampler_pyobj))
