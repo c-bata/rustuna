@@ -36,6 +36,12 @@ impl ToPythonStorage {
         Ok(ToPythonStorage { binding })
     }
 
+    /// Representation of user attribute values: ``"json"`` or ``"str"``.
+    #[getter]
+    fn attrs_format(&self) -> PyResult<&'static str> {
+        self.binding.attrs_format_name()
+    }
+
     fn create_new_study(
         &self,
         py: Python<'_>,
@@ -145,7 +151,12 @@ impl ToPythonStorage {
         self.binding.get_trial_number_from_id(py, trial_id)
     }
 
-    fn get_study_user_attr(&self, py: Python<'_>, study_id: u32, key: String) -> PyResult<String> {
+    fn get_study_user_attr(
+        &self,
+        py: Python<'_>,
+        study_id: u32,
+        key: String,
+    ) -> PyResult<Py<PyAny>> {
         self.binding.get_study_user_attr(py, study_id, key)
     }
 
@@ -154,7 +165,7 @@ impl ToPythonStorage {
         py: Python<'_>,
         study_id: u32,
         key: String,
-    ) -> PyResult<String> {
+    ) -> PyResult<Py<PyAny>> {
         self.binding.get_study_system_attr(py, study_id, key)
     }
 

@@ -36,6 +36,20 @@ def to_optuna_attrs(attrs: dict[str, str]) -> dict[str, Any]:
     return converted
 
 
+def to_rustuna_json_attrs(attrs: dict[str, Any]) -> dict[str, Any]:
+    """Convert Optuna's attrs for Rustuna storages with ``attrs_format="json"``.
+
+    Such storages accept any JSON-serializable value, so the values are passed as they are.
+    Only Optuna's legacy ``constraints`` list is split into Rustuna's constraint keys.
+    """
+    converted = dict(attrs)
+    if _CONSTRAINTS_KEY in converted:
+        constraints = converted.pop(_CONSTRAINTS_KEY)
+        for i, c in enumerate(constraints):
+            converted[_CONSTRAINTS_PREFIX + str(i)] = c
+    return converted
+
+
 def to_rustuna_attrs(attrs: dict[str, Any]) -> dict[str, str]:
     converted = {}
     for key, value in attrs.items():

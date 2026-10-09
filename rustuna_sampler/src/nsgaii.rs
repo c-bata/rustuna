@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use rand::prelude::*;
 use rand::rngs::StdRng;
-use rustuna_core::attr::{AttrKey, Attrs};
+use rustuna_core::attr::{json_to_plain, AttrKey, Attrs};
 use rustuna_core::distribution::Distribution;
 use rustuna_core::sampler::{Context, Sampler};
 use rustuna_core::storage::Storage;
@@ -226,7 +226,7 @@ impl NsgaiiSampler {
                 continue;
             }
             if let Some(gen_str) = trial.attrs.get(&generation_key) {
-                if let Ok(generation) = gen_str.parse::<u32>() {
+                if let Ok(generation) = json_to_plain(gen_str).parse::<u32>() {
                     generation_to_numbers
                         .entry(generation)
                         .or_default()
@@ -274,12 +274,13 @@ impl NsgaiiSampler {
         encoded: &str,
         population_size: usize,
     ) -> Result<Option<Vec<u32>>> {
-        let trial_ids: Vec<u32> = serde_json::from_str(encoded).map_err(|error| {
-            Error::with_reason(
-                ErrorKind::StorageError,
-                format!("Invalid NSGA-II parent cache: {error}"),
-            )
-        })?;
+        let trial_ids: Vec<u32> =
+            serde_json::from_str(&json_to_plain(encoded)).map_err(|error| {
+                Error::with_reason(
+                    ErrorKind::StorageError,
+                    format!("Invalid NSGA-II parent cache: {error}"),
+                )
+            })?;
         if trial_ids.len() != population_size {
             return Ok(None);
         }
@@ -552,13 +553,18 @@ impl Sampler for NsgaiiSampler {
             let trials = guard.get_trials(ctx.study_id)?;
             self.get_parent_population_numbers(ctx, trials, child_generation, cached_parent)?
         };
+        let format = guard.attr_format();
         let mut attrs = Attrs::with_capacity(1);
         attrs.insert(
             AttrKey::System("generation".into()),
-            (child_generation as f64).to_string(),
+            format.encode_plain((child_generation as f64).to_string()),
         );
         guard.set_trial_attrs(ctx.trial_id, attrs, false)?;
         if !parent_cache_attrs.is_empty() {
+            let parent_cache_attrs = parent_cache_attrs
+                .into_iter()
+                .map(|(key, value)| (key, format.encode_plain(value)))
+                .collect();
             guard.set_study_attrs(ctx.study_id, parent_cache_attrs, false)?;
         }
 
@@ -637,7 +643,7 @@ impl Sampler for NsgaiiSampler {
             let trial = guard.get_trial(ctx.trial_id)?;
             let generation_key = AttrKey::System("generation".into());
             if let Some(gen_str) = trial.attrs.get(&generation_key) {
-                if let Ok(generation) = gen_str.parse::<u32>() {
+                if let Ok(generation) = json_to_plain(gen_str).parse::<u32>() {
                     let mut generation_to_numbers = self.generation_to_numbers.write().unwrap();
                     generation_to_numbers
                         .entry(generation)

@@ -7,6 +7,7 @@ use rustuna_core::storage::Storage;
 use rustuna_storage::journal::file::JournalFileBackend;
 use rustuna_storage::journal::storage::{JournalStorage, JournalStorageOptions};
 
+use crate::attrs::parse_attr_format;
 use crate::distribution::PyDistribution;
 use crate::storage::binding::StorageBinding;
 use crate::study::{PyDirection, PyPersistedStudy};
@@ -28,18 +29,28 @@ impl PyJournalFileStorage {
 #[pymethods]
 impl PyJournalFileStorage {
     #[new]
-    #[pyo3(signature = (file_path, *, apply_discard = false))]
-    fn py_new(file_path: &str, apply_discard: bool) -> PyResult<Self> {
+    #[pyo3(signature = (file_path, *, apply_discard = false, attrs_format = "json"))]
+    fn py_new(file_path: &str, apply_discard: bool, attrs_format: &str) -> PyResult<Self> {
+        let attr_format = parse_attr_format(attrs_format)?;
         let backend = JournalFileBackend::new(file_path, None).map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to create journal file: {e:?}"))
         })?;
         let storage = JournalStorage::new_with_options(
             Box::new(backend),
-            JournalStorageOptions { apply_discard },
+            JournalStorageOptions {
+                apply_discard,
+                attr_format,
+            },
         )
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to create journal storage: {e:?}")))?;
         let binding = StorageBinding::new(Arc::new(RwLock::new(storage)));
         Ok(PyJournalFileStorage { binding })
+    }
+
+    /// Representation of user attribute values: ``"json"`` or ``"str"``.
+    #[getter]
+    fn attrs_format(&self) -> PyResult<&'static str> {
+        self.binding.attrs_format_name()
     }
 
     fn create_new_study(
@@ -151,7 +162,12 @@ impl PyJournalFileStorage {
         self.binding.get_trial_number_from_id(py, trial_id)
     }
 
-    fn get_study_user_attr(&self, py: Python<'_>, study_id: u32, key: String) -> PyResult<String> {
+    fn get_study_user_attr(
+        &self,
+        py: Python<'_>,
+        study_id: u32,
+        key: String,
+    ) -> PyResult<Py<PyAny>> {
         self.binding.get_study_user_attr(py, study_id, key)
     }
 
@@ -160,7 +176,7 @@ impl PyJournalFileStorage {
         py: Python<'_>,
         study_id: u32,
         key: String,
-    ) -> PyResult<String> {
+    ) -> PyResult<Py<PyAny>> {
         self.binding.get_study_system_attr(py, study_id, key)
     }
 

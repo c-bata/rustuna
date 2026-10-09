@@ -3,7 +3,8 @@ use rusqlite::{
     params, Connection, Error as RusqliteError, OptionalExtension, TransactionBehavior,
 };
 use rustuna_core::attr::{
-    category_labels_to_attrs, get_category_labels, AttrKey, Attrs, CategoryLabel,
+    category_labels_to_attrs, get_category_labels, json_to_plain, plain_to_json, validate_json,
+    AttrFormat, AttrKey, Attrs, CategoryLabel,
 };
 use rustuna_core::distribution::Distribution;
 use rustuna_core::internal::datetime::now_naive_utc;
@@ -23,6 +24,13 @@ pub struct SQLite3StorageOptions {
     /// As in `JournalStorageOptions`, this only gates reads: `discard_trials` marks the trials
     /// in the database regardless of this option.
     pub apply_discard: bool,
+    /// Representation of user and system attribute values.
+    ///
+    /// Both formats write valid JSON into `value_json`, so Optuna can always read the values.
+    /// With [`AttrFormat::Plain`], strings are JSON-encoded on write and unquoted on read. With
+    /// [`AttrFormat::Json`], values must already be JSON texts and are stored as-is, which is the
+    /// same representation as Optuna's `RDBStorage`.
+    pub attr_format: AttrFormat,
 }
 
 /// SQLite-backed storage backend.
@@ -237,9 +245,32 @@ impl SQLite3Storage {
     }
 }
 
+impl SQLite3Storage {
+    fn encode_attr(&self, value: String) -> Result<String> {
+        match self.options.attr_format {
+            AttrFormat::Plain => Ok(plain_to_json(&value)),
+            AttrFormat::Json => {
+                validate_json(&value)?;
+                Ok(value)
+            }
+        }
+    }
+
+    fn decode_attr(&self, value: String) -> String {
+        match self.options.attr_format {
+            AttrFormat::Plain => json_to_plain(&value),
+            AttrFormat::Json => value,
+        }
+    }
+}
+
 impl CachedStorageBackend for SQLite3Storage {
     fn apply_discard(&self) -> bool {
         self.options.apply_discard
+    }
+
+    fn attr_format(&self) -> AttrFormat {
+        self.options.attr_format
     }
 
     fn discard_trials(&mut self, trial_ids: &[u32]) -> Result<()> {
@@ -927,7 +958,7 @@ impl CachedStorageBackend for SQLite3Storage {
                         format!("Database query failed: {e}"),
                     )
                 })?;
-                attrs.insert(AttrKey::User(key.into()), value);
+                attrs.insert(AttrKey::User(key.into()), self.decode_attr(value));
             }
 
             let mut system_stmt = guard
@@ -955,7 +986,7 @@ impl CachedStorageBackend for SQLite3Storage {
                         format!("Database query failed: {e}"),
                     )
                 })?;
-                attrs.insert(AttrKey::System(key.into()), value);
+                attrs.insert(AttrKey::System(key.into()), self.decode_attr(value));
             }
 
             // Optuna stores categorical labels in each distribution JSON, whereas Rustuna's
@@ -993,7 +1024,9 @@ impl CachedStorageBackend for SQLite3Storage {
                 })?;
                 let (_, labels) = json_to_distribution(&distribution_json)?;
                 if let Some(labels) = labels {
-                    for (key, value) in category_labels_to_attrs(&param_name, &labels) {
+                    for (key, value) in
+                        category_labels_to_attrs(&param_name, &labels, self.options.attr_format)
+                    {
                         attrs.entry(key).or_insert(value);
                     }
                 }
@@ -1106,7 +1139,7 @@ impl CachedStorageBackend for SQLite3Storage {
                     format!("Database query failed: {e}"),
                 )
             })?;
-            attrs.insert(AttrKey::User(key.into()), value);
+            attrs.insert(AttrKey::User(key.into()), self.decode_attr(value));
         }
 
         // System attributes
@@ -1135,7 +1168,7 @@ impl CachedStorageBackend for SQLite3Storage {
                     format!("Database query failed: {e}"),
                 )
             })?;
-            attrs.insert(AttrKey::System(key.into()), value);
+            attrs.insert(AttrKey::System(key.into()), self.decode_attr(value));
         }
 
         let intermediate_values = read_intermediate_values(&guard, trial_id)?;
@@ -1165,7 +1198,7 @@ impl CachedStorageBackend for SQLite3Storage {
             AttrKey::System(k) => ("study_system_attributes", k.as_str()),
         };
         let sql = format!("SELECT value_json FROM {table} WHERE study_id = ? AND key = ?");
-        guard
+        let value: String = guard
             .query_row(&sql, params![study_id, key_str], |row| row.get(0))
             .optional()
             .map_err(|e| {
@@ -1174,7 +1207,8 @@ impl CachedStorageBackend for SQLite3Storage {
                     format!("Database query failed: {e}"),
                 )
             })?
-            .ok_or(Error::new(ErrorKind::AttrNotFound))
+            .ok_or(Error::new(ErrorKind::AttrNotFound))?;
+        Ok(self.decode_attr(value))
     }
 
     fn set_study_attrs(
@@ -1189,8 +1223,12 @@ impl CachedStorageBackend for SQLite3Storage {
         let mut system_attrs = Vec::new();
         for (key, value) in attrs {
             match key {
-                AttrKey::User(key_str) => user_attrs.push((key_str.to_string(), value)),
-                AttrKey::System(key_str) => system_attrs.push((key_str.to_string(), value)),
+                AttrKey::User(key_str) => {
+                    user_attrs.push((key_str.to_string(), self.encode_attr(value)?))
+                }
+                AttrKey::System(key_str) => {
+                    system_attrs.push((key_str.to_string(), self.encode_attr(value)?))
+                }
             }
         }
 
@@ -1302,8 +1340,12 @@ impl CachedStorageBackend for SQLite3Storage {
         let mut system_attrs = Vec::new();
         for (key, value) in attrs {
             match key {
-                AttrKey::User(key_str) => user_attrs.push((key_str.to_string(), value)),
-                AttrKey::System(key_str) => system_attrs.push((key_str.to_string(), value)),
+                AttrKey::User(key_str) => {
+                    user_attrs.push((key_str.to_string(), self.encode_attr(value)?))
+                }
+                AttrKey::System(key_str) => {
+                    system_attrs.push((key_str.to_string(), self.encode_attr(value)?))
+                }
             }
         }
 
@@ -1653,7 +1695,7 @@ impl CachedStorageBackend for SQLite3Storage {
                         format!("Database query failed: {e}"),
                     )
                 })?;
-                attrs.insert(AttrKey::User(key.into()), value);
+                attrs.insert(AttrKey::User(key.into()), self.decode_attr(value));
             }
 
             // Get system attributes
@@ -1682,7 +1724,7 @@ impl CachedStorageBackend for SQLite3Storage {
                         format!("Database query failed: {e}"),
                     )
                 })?;
-                attrs.insert(AttrKey::System(key.into()), value);
+                attrs.insert(AttrKey::System(key.into()), self.decode_attr(value));
             }
 
             let intermediate_values = read_intermediate_values(&guard, trial_id)?;
@@ -1897,7 +1939,7 @@ fn read_category_labels(
                 format!("Database query failed: {e}"),
             )
         })?;
-        attrs.insert(AttrKey::System(key.into()), value);
+        attrs.insert(AttrKey::System(key.into()), json_to_plain(&value));
     }
     Ok(get_category_labels(&attrs, param_name, cardinality))
 }
@@ -2306,6 +2348,7 @@ mod tests {
     fn discard_trials_are_omitted_by_cached_storage() -> Result<()> {
         let backend = init_storage_with_option(SQLite3StorageOptions {
             apply_discard: true,
+            ..Default::default()
         })?;
         let mut storage = CachedStorage::new(Box::new(backend));
         assert!(storage.may_omit_trials());
@@ -2328,8 +2371,13 @@ mod tests {
     }
 
     fn open_file_storage(path: &str, apply_discard: bool) -> Result<CachedStorage> {
-        let backend =
-            SQLite3Storage::new_with_option(path, SQLite3StorageOptions { apply_discard })?;
+        let backend = SQLite3Storage::new_with_option(
+            path,
+            SQLite3StorageOptions {
+                apply_discard,
+                ..Default::default()
+            },
+        )?;
         backend.create_database()?;
         backend.validate_discard_support()?;
         Ok(CachedStorage::new(Box::new(backend)))
@@ -3199,6 +3247,119 @@ mod tests {
             .expect_err("Expected TrialNotFound error");
         assert!(matches!(err.kind, ErrorKind::TrialNotFound));
 
+        Ok(())
+    }
+
+    fn raw_trial_user_attr(storage: &SQLite3Storage, trial_id: u32, key: &str) -> Result<String> {
+        let guard = storage.conn.lock().unwrap();
+        guard
+            .query_row(
+                "SELECT value_json FROM trial_user_attributes WHERE trial_id = ? AND key = ?",
+                params![trial_id, key],
+                |row| row.get(0),
+            )
+            .map_err(|e| Error::with_reason(ErrorKind::StorageError, e.to_string()))
+    }
+
+    #[test]
+    fn user_attrs_are_stored_as_json_in_both_formats() -> Result<()> {
+        for (format, stored, raw) in [
+            (AttrFormat::Plain, "Cu2O", "\"Cu2O\""),
+            (AttrFormat::Json, "\"Cu2O\"", "\"Cu2O\""),
+            (AttrFormat::Plain, "123", "\"123\""),
+            (AttrFormat::Json, "[1, 2]", "[1, 2]"),
+        ] {
+            let mut storage = init_storage_with_option(SQLite3StorageOptions {
+                attr_format: format,
+                ..Default::default()
+            })?;
+            let study_id = storage
+                .create_new_study("example", vec![Direction::Minimize])?
+                .id;
+            let trial = storage.create_new_trial(study_id)?;
+            let mut attrs = Attrs::new();
+            attrs.insert(AttrKey::User("key".into()), stored.to_string());
+            storage.set_trial_attrs(trial.id, attrs, false)?;
+
+            assert_eq!(raw_trial_user_attr(&storage, trial.id, "key")?, raw);
+            let trial = storage.get_trial(trial.id)?;
+            assert_eq!(
+                trial.attrs.get(&AttrKey::User("key".into())),
+                Some(&stored.to_string())
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn json_user_attrs_must_be_json_texts() -> Result<()> {
+        let mut storage = init_storage_with_option(SQLite3StorageOptions {
+            attr_format: AttrFormat::Json,
+            ..Default::default()
+        })?;
+        let study_id = storage
+            .create_new_study("example", vec![Direction::Minimize])?
+            .id;
+        let mut attrs = Attrs::new();
+        attrs.insert(AttrKey::User("key".into()), "Cu2O".to_string());
+        assert!(storage.set_study_attrs(study_id, attrs, false).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn plain_format_reads_study_attrs_written_by_optuna() -> Result<()> {
+        let mut storage = init_storage()?;
+        let study_id = storage
+            .create_new_study("example", vec![Direction::Minimize])?
+            .id;
+        {
+            let guard = storage.conn.lock().unwrap();
+            guard
+                .execute(
+                    "INSERT INTO study_user_attributes (study_id, key, value_json) VALUES \
+                     (?, 'elements', '[\"O\", \"Ti\"]'), (?, 'name', '\"TiO2\"')",
+                    params![study_id, study_id],
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            storage.get_study_attr(study_id, AttrKey::User("elements".into()))?,
+            "[\"O\", \"Ti\"]"
+        );
+        assert_eq!(
+            storage.get_study_attr(study_id, AttrKey::User("name".into()))?,
+            "TiO2"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn system_attrs_are_stored_as_json_strings() -> Result<()> {
+        let mut storage = init_storage()?;
+        let study_id = storage
+            .create_new_study("example", vec![Direction::Minimize])?
+            .id;
+        let trial = storage.create_new_trial(study_id)?;
+        let mut attrs = Attrs::new();
+        attrs.insert(AttrKey::System("label".into()), "s:abc".to_string());
+        storage.set_trial_attrs(trial.id, attrs, false)?;
+
+        let raw: String = storage
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT value_json FROM trial_system_attributes WHERE trial_id = ?",
+                params![trial.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw, "\"s:abc\"");
+        let trial = storage.get_trial(trial.id)?;
+        assert_eq!(
+            trial.attrs.get(&AttrKey::System("label".into())),
+            Some(&"s:abc".to_string())
+        );
         Ok(())
     }
 }

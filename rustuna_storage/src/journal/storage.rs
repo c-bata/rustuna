@@ -7,7 +7,8 @@ use serde_json::value::{to_raw_value, RawValue};
 use serde_json::{Map, Number, Value};
 
 use rustuna_core::attr::{
-    category_labels_to_attrs, get_category_labels, AttrKey, Attrs, CategoryLabel,
+    category_labels_to_attrs, get_category_labels, json_to_plain, validate_json, AttrFormat,
+    AttrKey, Attrs, CategoryLabel,
 };
 use rustuna_core::distribution::Distribution;
 use rustuna_core::internal::study_cache::StudyCache;
@@ -25,6 +26,12 @@ pub struct JournalStorageOptions {
     /// If `true`, discarded trials are omitted when replaying the journal.
     /// Discard logs are written regardless of this option.
     pub apply_discard: bool,
+    /// Representation of user attribute values.
+    ///
+    /// With [`AttrFormat::Json`], user attributes are written in Optuna's schema (one
+    /// `user_attr` log per key with the raw JSON value), so Optuna can read them. Logs written in
+    /// either format are readable in both formats.
+    pub attr_format: AttrFormat,
 }
 
 /// Storage implementation backed by an append-only journal log.
@@ -50,7 +57,11 @@ impl JournalStorage {
         let worker_id_prefix = format!("{}-{}-", unique_prefix(), std::process::id());
         let mut storage = JournalStorage {
             backend,
-            replay: JournalReplayState::new(worker_id_prefix, options.apply_discard),
+            replay: JournalReplayState::new(
+                worker_id_prefix,
+                options.apply_discard,
+                options.attr_format,
+            ),
         };
         storage.sync_with_backend()?;
         Ok(storage)
@@ -76,6 +87,73 @@ impl JournalStorage {
             fields,
         };
         self.backend.append_logs(&[log])
+    }
+
+    /// Writes user or system attributes of a study or a trial.
+    ///
+    /// `id_key` is `"study_id"` or `"trial_id"`, and `field` is `"user_attr"` or
+    /// `"system_attr"`.
+    fn write_attrs(
+        &mut self,
+        op_code: JournalOperation,
+        id_key: &str,
+        id: u32,
+        field: &str,
+        attrs: HashMap<String, String>,
+    ) -> Result<()> {
+        if attrs.is_empty() {
+            return Ok(());
+        }
+        match self.replay.attr_format {
+            AttrFormat::Plain => {
+                // Design note: in the plain format, Rustuna stores string maps in
+                // `{field}_str` without double JSON encoding, and writes `{"rustuna": null}` to
+                // Optuna's field. Optuna applies only this dummy field and ignores the
+                // Rustuna-specific field.
+                let mut fields = HashMap::new();
+                fields.insert(id_key.to_string(), to_raw(&id)?);
+                fields.insert(
+                    field.to_string(),
+                    to_raw(&HashMap::from([("rustuna", Value::Null)]))?,
+                );
+                fields.insert(format!("{field}_str"), to_raw(&attrs)?);
+                self.write_log(op_code, fields)
+            }
+            AttrFormat::Json => {
+                // Optuna's schema: one log per key because Optuna asserts
+                // `len(log[field]) == 1`. All logs are appended at once.
+                let worker_id = self.worker_id();
+                let mut logs = Vec::with_capacity(attrs.len());
+                for (key, value) in attrs {
+                    let mut fields = HashMap::new();
+                    fields.insert(id_key.to_string(), to_raw(&id)?);
+                    fields.insert(
+                        field.to_string(),
+                        to_raw(&HashMap::from([(key, json_text_to_raw(value)?)]))?,
+                    );
+                    logs.push(JournalLog {
+                        op_code: op_code as i32,
+                        worker_id: worker_id.clone(),
+                        fields,
+                    });
+                }
+                self.backend.append_logs(&logs)
+            }
+        }
+    }
+
+    /// Converts attribute values of a `create_trial` log into raw JSON fields.
+    fn attrs_to_raw(&self, attrs: HashMap<String, String>) -> Result<Box<RawValue>> {
+        match self.replay.attr_format {
+            AttrFormat::Plain => to_raw(&attrs),
+            AttrFormat::Json => {
+                let mut raw_attrs = HashMap::with_capacity(attrs.len());
+                for (key, value) in attrs {
+                    raw_attrs.insert(key, json_text_to_raw(value)?);
+                }
+                to_raw(&raw_attrs)
+            }
+        }
     }
 
     fn sync_with_backend(&mut self) -> Result<()> {
@@ -238,7 +316,8 @@ impl Storage for JournalStorage {
                     format!("Template trial has no internal param for '{param_name}'"),
                 )
             })?;
-            params.insert(param_name.clone(), param_value.to_string());
+            // Internal representations are written as JSON numbers, as Optuna does.
+            params.insert(param_name.clone(), value_to_json(*param_value));
             let labels = self.replay.labels_for_param(study_id, param_name);
             let dist_json = distribution_to_json(distribution, labels.as_deref())?;
             distributions.insert(param_name.clone(), dist_json);
@@ -260,8 +339,8 @@ impl Storage for JournalStorage {
         }
         fields.insert("params".to_string(), to_raw(&params)?);
         fields.insert("distributions".to_string(), to_raw(&distributions)?);
-        fields.insert("user_attrs".to_string(), to_raw(&user_attrs)?);
-        fields.insert("system_attrs".to_string(), to_raw(&system_attrs)?);
+        fields.insert("user_attrs".to_string(), self.attrs_to_raw(user_attrs)?);
+        fields.insert("system_attrs".to_string(), self.attrs_to_raw(system_attrs)?);
         fields.insert(
             "intermediate_values".to_string(),
             to_raw(&intermediate_values_json)?,
@@ -571,7 +650,7 @@ impl Storage for JournalStorage {
         param_name: &str,
         labels: Vec<CategoryLabel>,
     ) -> Result<()> {
-        let attrs = category_labels_to_attrs(param_name, &labels);
+        let attrs = category_labels_to_attrs(param_name, &labels, self.replay.attr_format);
         self.set_study_attrs(study_id, attrs, true)
     }
 
@@ -609,10 +688,7 @@ impl Storage for JournalStorage {
             }
         }
 
-        // Design note: Rustuna intentionally does not share Optuna's user/system attribute value
-        // schema. Rustuna stores string maps in `user_attr_str`/`system_attr_str` without
-        // double JSON encoding, and writes `{"rustuna": null}` to Optuna's fields. Optuna applies
-        // only this dummy field and ignores the Rustuna-specific fields.
+        // User and system attributes are written according to `attr_format`; see `write_attrs`.
         let mut user_attrs = HashMap::new();
         let mut system_attrs = HashMap::new();
         for (key, value) in attrs {
@@ -625,26 +701,20 @@ impl Storage for JournalStorage {
                 }
             }
         }
-        if !user_attrs.is_empty() {
-            let mut fields = HashMap::new();
-            fields.insert("study_id".to_string(), to_raw(&study_id)?);
-            fields.insert(
-                "user_attr".to_string(),
-                to_raw(&HashMap::from([("rustuna", Value::Null)]))?,
-            );
-            fields.insert("user_attr_str".to_string(), to_raw(&user_attrs)?);
-            self.write_log(JournalOperation::SetStudyUserAttr, fields)?;
-        }
-        if !system_attrs.is_empty() {
-            let mut fields = HashMap::new();
-            fields.insert("study_id".to_string(), to_raw(&study_id)?);
-            fields.insert(
-                "system_attr".to_string(),
-                to_raw(&HashMap::from([("rustuna", Value::Null)]))?,
-            );
-            fields.insert("system_attr_str".to_string(), to_raw(&system_attrs)?);
-            self.write_log(JournalOperation::SetStudySystemAttr, fields)?;
-        }
+        self.write_attrs(
+            JournalOperation::SetStudyUserAttr,
+            "study_id",
+            study_id,
+            "user_attr",
+            user_attrs,
+        )?;
+        self.write_attrs(
+            JournalOperation::SetStudySystemAttr,
+            "study_id",
+            study_id,
+            "system_attr",
+            system_attrs,
+        )?;
         self.sync_with_backend()?;
         Ok(())
     }
@@ -681,10 +751,7 @@ impl Storage for JournalStorage {
             }
         }
 
-        // Design note: Rustuna intentionally does not share Optuna's user/system attribute value
-        // schema. Rustuna stores string maps in `user_attr_str`/`system_attr_str` without
-        // double JSON encoding, and writes `{"rustuna": null}` to Optuna's fields. Optuna applies
-        // only this dummy field and ignores the Rustuna-specific fields.
+        // Design note: see `set_study_attrs`.
         let mut user_attrs = HashMap::new();
         let mut system_attrs = HashMap::new();
         for (key, value) in attrs {
@@ -697,26 +764,20 @@ impl Storage for JournalStorage {
                 }
             }
         }
-        if !user_attrs.is_empty() {
-            let mut fields = HashMap::new();
-            fields.insert("trial_id".to_string(), to_raw(&trial_id)?);
-            fields.insert(
-                "user_attr".to_string(),
-                to_raw(&HashMap::from([("rustuna", Value::Null)]))?,
-            );
-            fields.insert("user_attr_str".to_string(), to_raw(&user_attrs)?);
-            self.write_log(JournalOperation::SetTrialUserAttr, fields)?;
-        }
-        if !system_attrs.is_empty() {
-            let mut fields = HashMap::new();
-            fields.insert("trial_id".to_string(), to_raw(&trial_id)?);
-            fields.insert(
-                "system_attr".to_string(),
-                to_raw(&HashMap::from([("rustuna", Value::Null)]))?,
-            );
-            fields.insert("system_attr_str".to_string(), to_raw(&system_attrs)?);
-            self.write_log(JournalOperation::SetTrialSystemAttr, fields)?;
-        }
+        self.write_attrs(
+            JournalOperation::SetTrialUserAttr,
+            "trial_id",
+            trial_id,
+            "user_attr",
+            user_attrs,
+        )?;
+        self.write_attrs(
+            JournalOperation::SetTrialSystemAttr,
+            "trial_id",
+            trial_id,
+            "system_attr",
+            system_attrs,
+        )?;
         self.sync_with_backend()?;
         Ok(())
     }
@@ -781,6 +842,10 @@ impl Storage for JournalStorage {
             .values()
             .any(|trials| trials.iter().any(Option::is_none))
     }
+
+    fn attr_format(&self) -> AttrFormat {
+        self.replay.attr_format
+    }
 }
 
 struct JournalReplayState {
@@ -798,10 +863,11 @@ struct JournalReplayState {
     study_caches: HashMap<u32, StudyCache>,
     discarded_state_counts: HashMap<(u32, TrialState), u32>,
     apply_discard: bool,
+    attr_format: AttrFormat,
 }
 
 impl JournalReplayState {
-    fn new(worker_id_prefix: String, apply_discard: bool) -> Self {
+    fn new(worker_id_prefix: String, apply_discard: bool, attr_format: AttrFormat) -> Self {
         JournalReplayState {
             log_number_read: 0,
             worker_id_prefix,
@@ -817,7 +883,46 @@ impl JournalReplayState {
             study_caches: HashMap::new(),
             discarded_state_counts: HashMap::new(),
             apply_discard,
+            attr_format,
         }
+    }
+
+    /// Converts an attribute value embedded as raw JSON (Optuna's schema) into the
+    /// representation of this storage.
+    fn attr_from_json_value(&self, value: &RawValue) -> Result<String> {
+        match self.attr_format {
+            AttrFormat::Json => Ok(value.get().to_string()),
+            AttrFormat::Plain => raw_value_to_attr_string(value),
+        }
+    }
+
+    /// Extracts attributes from a `SET_{STUDY,TRIAL}_{USER,SYSTEM}_ATTR` log.
+    ///
+    /// `field` is `"user_attr"` or `"system_attr"`. Logs written in the plain format carry the
+    /// values in `{field}_str` (and a dummy `{field}`), while logs written by Optuna or in the
+    /// JSON format carry raw JSON values in `{field}`. Both are converted into the
+    /// representation of this storage.
+    fn attrs_from_log(
+        &self,
+        log: &JournalLog,
+        field: &str,
+    ) -> Result<Option<Vec<(String, String)>>> {
+        if let Some(attrs) = get_optional_raw_map(&log.fields, &format!("{field}_str"))? {
+            let mut converted = Vec::with_capacity(attrs.len());
+            for (key, value) in attrs {
+                let plain = raw_value_to_attr_string(&value)?;
+                converted.push((key, self.attr_format.encode_plain(plain)));
+            }
+            return Ok(Some(converted));
+        }
+        if let Some(attrs) = get_optional_raw_map(&log.fields, field)? {
+            let mut converted = Vec::with_capacity(attrs.len());
+            for (key, value) in attrs {
+                converted.push((key, self.attr_from_json_value(&value)?));
+            }
+            return Ok(Some(converted));
+        }
+        Ok(None)
     }
 
     fn get_n_trials(&self, study_id: u32, states: Option<&[TrialState]>) -> Result<u32> {
@@ -1003,7 +1108,7 @@ impl JournalReplayState {
 
     fn apply_set_study_user_attr(&mut self, log: &JournalLog, worker_id: &str) -> Result<()> {
         let study_id = get_u32(&log.fields, "study_id")?;
-        let Some(attrs) = get_optional_raw_map(&log.fields, "user_attr_str")? else {
+        let Some(attrs) = self.attrs_from_log(log, "user_attr")? else {
             return Ok(());
         };
         if !self.study_exists(study_id, log, worker_id)? {
@@ -1011,8 +1116,7 @@ impl JournalReplayState {
         }
         if let Some(study) = self.studies.get_mut(&study_id) {
             for (key, value) in attrs {
-                let value = raw_value_to_attr_string(&value)?;
-                study.attrs.insert(AttrKey::User(key.clone().into()), value);
+                study.attrs.insert(AttrKey::User(key.into()), value);
             }
         }
         Ok(())
@@ -1020,7 +1124,7 @@ impl JournalReplayState {
 
     fn apply_set_study_system_attr(&mut self, log: &JournalLog, worker_id: &str) -> Result<()> {
         let study_id = get_u32(&log.fields, "study_id")?;
-        let Some(attrs) = get_optional_raw_map(&log.fields, "system_attr_str")? else {
+        let Some(attrs) = self.attrs_from_log(log, "system_attr")? else {
             return Ok(());
         };
         if !self.study_exists(study_id, log, worker_id)? {
@@ -1028,12 +1132,7 @@ impl JournalReplayState {
         }
         if let Some(study) = self.studies.get_mut(&study_id) {
             for (key, value) in attrs {
-                let v = if key.starts_with("category_labels:") {
-                    raw_value_to_plain_string(&value)?
-                } else {
-                    raw_value_to_attr_string(&value)?
-                };
-                study.attrs.insert(AttrKey::System(key.clone().into()), v);
+                study.attrs.insert(AttrKey::System(key.into()), value);
             }
         }
         Ok(())
@@ -1102,7 +1201,7 @@ impl JournalReplayState {
                 let dist_json = raw_value_to_json_string(&dist_json)?;
                 let (dist, labels) = json_to_distribution(&dist_json)?;
                 if let Some(labels) = labels {
-                    let attrs = category_labels_to_attrs(&name, &labels);
+                    let attrs = category_labels_to_attrs(&name, &labels, self.attr_format);
                     if let Some(study) = self.studies.get_mut(&study_id) {
                         for (k, v) in attrs {
                             study.attrs.entry(k).or_insert(v);
@@ -1117,13 +1216,13 @@ impl JournalReplayState {
 
         if let Some(user_attrs) = user_attrs {
             for (k, v) in user_attrs {
-                let value = raw_value_to_attr_string(&v)?;
+                let value = self.attr_from_json_value(&v)?;
                 attrs.insert(AttrKey::User(k.clone().into()), value);
             }
         }
         if let Some(system_attrs) = system_attrs {
             for (k, v) in system_attrs {
-                let value = raw_value_to_attr_string(&v)?;
+                let value = self.attr_from_json_value(&v)?;
                 attrs.insert(AttrKey::System(k.clone().into()), value);
             }
         }
@@ -1192,7 +1291,7 @@ impl JournalReplayState {
         }
 
         if let Some(labels) = labels {
-            let attrs = category_labels_to_attrs(&param_name, &labels);
+            let attrs = category_labels_to_attrs(&param_name, &labels, self.attr_format);
             if let Some(study) = self.studies.get_mut(&study_id) {
                 for (k, v) in attrs {
                     study.attrs.entry(k).or_insert(v);
@@ -1370,7 +1469,7 @@ impl JournalReplayState {
 
     fn apply_set_trial_user_attr(&mut self, log: &JournalLog, worker_id: &str) -> Result<()> {
         let trial_id = get_u32(&log.fields, "trial_id")?;
-        let Some(attrs) = get_optional_raw_map(&log.fields, "user_attr_str")? else {
+        let Some(attrs) = self.attrs_from_log(log, "user_attr")? else {
             return Ok(());
         };
         if !self.trial_exists_and_updatable(trial_id, log, worker_id)? {
@@ -1407,15 +1506,14 @@ impl JournalReplayState {
             )
         })?;
         for (key, value) in attrs {
-            let v = raw_value_to_attr_string(&value)?;
-            trial.attrs.insert(AttrKey::User(key.clone().into()), v);
+            trial.attrs.insert(AttrKey::User(key.into()), value);
         }
         Ok(())
     }
 
     fn apply_set_trial_system_attr(&mut self, log: &JournalLog, worker_id: &str) -> Result<()> {
         let trial_id = get_u32(&log.fields, "trial_id")?;
-        let Some(attrs) = get_optional_raw_map(&log.fields, "system_attr_str")? else {
+        let Some(attrs) = self.attrs_from_log(log, "system_attr")? else {
             return Ok(());
         };
         let (study_id, trial_number) = match self.trial_id_to_study_number.get(&trial_id) {
@@ -1461,8 +1559,7 @@ impl JournalReplayState {
                 }
                 return Ok(());
             }
-            let v = raw_value_to_attr_string(&value)?;
-            trial.attrs.insert(AttrKey::System(key.clone().into()), v);
+            trial.attrs.insert(AttrKey::System(key.into()), value);
         }
         Ok(())
     }
@@ -1903,6 +2000,22 @@ fn to_raw<T: Serialize>(value: &T) -> Result<Box<RawValue>> {
     to_raw_value(value).map_err(|e| Error::with_reason(ErrorKind::StorageError, e.to_string()))
 }
 
+/// Embeds a JSON attribute value into a journal log without re-serializing it.
+fn json_text_to_raw(value: String) -> Result<Box<RawValue>> {
+    validate_json(&value)?;
+    RawValue::from_string(value.clone()).map_err(|e| {
+        // `validate_json` accepts Python's `NaN` and `Infinity`, but journal logs must be strict
+        // JSON to be replayable by Rustuna.
+        Error::with_reason(
+            ErrorKind::StorageError,
+            format!(
+                "Journal storage cannot store non-finite floats (NaN or Infinity) in user \
+                 attributes: value={value:?}, error={e}"
+            ),
+        )
+    })
+}
+
 fn get_raw<'a>(fields: &'a HashMap<String, Box<RawValue>>, key: &str) -> Result<&'a RawValue> {
     fields.get(key).map(|v| v.as_ref()).ok_or_else(|| {
         Error::with_reason(
@@ -2108,7 +2221,7 @@ fn extract_category_labels(attrs: &Attrs, param_name: &str) -> Option<Vec<Catego
         let key = AttrKey::System(format!("category_labels:{param_name}:{index}").into());
         match attrs.get(&key) {
             Some(raw) => {
-                let label = CategoryLabel::deserialize(raw)?;
+                let label = CategoryLabel::deserialize(&json_to_plain(raw))?;
                 labels.push(label);
                 index += 1;
             }
@@ -2334,6 +2447,7 @@ mod tests {
             Box::new(backend),
             JournalStorageOptions {
                 apply_discard: true,
+                ..Default::default()
             },
         )?;
         let trials = reloaded.get_trials(study_id)?;
@@ -2454,6 +2568,7 @@ mod tests {
             Box::new(backend),
             JournalStorageOptions {
                 apply_discard: false,
+                ..Default::default()
             },
         )?;
         let trials = storage2.get_trials(study_id)?;
@@ -2471,6 +2586,7 @@ mod tests {
             Box::new(backend),
             JournalStorageOptions {
                 apply_discard: true,
+                ..Default::default()
             },
         )?;
         let study_id = storage.create_new_study("s", vec![Direction::Minimize])?.id;
@@ -2739,6 +2855,202 @@ mod tests {
             .set_trial_param(trial1_id, "x", &int_dist, 1.0)
             .expect_err("Expected IncompatibleDistribution error");
         assert!(matches!(err.kind, ErrorKind::IncompatibleDistribution));
+        Ok(())
+    }
+
+    fn new_storage_with_format(
+        logs: &Arc<Mutex<Vec<JournalLog>>>,
+        attr_format: AttrFormat,
+    ) -> Result<JournalStorage> {
+        let backend = InMemoryJournalBackend { logs: logs.clone() };
+        JournalStorage::new_with_options(
+            Box::new(backend),
+            JournalStorageOptions {
+                attr_format,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn user_attr(trial: &PersistedTrial, key: &str) -> Option<String> {
+        trial.attrs.get(&AttrKey::User(key.into())).cloned()
+    }
+
+    #[test]
+    fn json_user_attrs_are_written_in_optuna_schema() -> Result<()> {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let mut storage = new_storage_with_format(&logs, AttrFormat::Json)?;
+        let study_id = storage
+            .create_new_study("study", vec![Direction::Minimize])?
+            .id;
+        let trial_id = storage.create_new_trial(study_id)?.id;
+        let mut attrs = Attrs::new();
+        attrs.insert(AttrKey::User("generation".into()), "3".to_string());
+        attrs.insert(AttrKey::User("formula".into()), "\"Cu2O\"".to_string());
+        storage.set_trial_attrs(trial_id, attrs, false)?;
+
+        let logs_guard = logs.lock().unwrap();
+        let attr_logs: Vec<_> = logs_guard
+            .iter()
+            .filter(|log| log.op_code == JournalOperation::SetTrialUserAttr as i32)
+            .collect();
+        // One log per key, as Optuna asserts `len(log["user_attr"]) == 1`.
+        assert_eq!(attr_logs.len(), 2);
+        let mut user_attrs: Vec<String> = attr_logs
+            .iter()
+            .map(|log| {
+                assert!(!log.fields.contains_key("user_attr_str"));
+                log.fields["user_attr"].get().to_string()
+            })
+            .collect();
+        user_attrs.sort();
+        assert_eq!(
+            user_attrs,
+            vec![r#"{"formula":"Cu2O"}"#, r#"{"generation":3}"#]
+        );
+        drop(logs_guard);
+
+        let trial = storage.get_trial(trial_id)?;
+        assert_eq!(user_attr(trial, "generation").as_deref(), Some("3"));
+        assert_eq!(user_attr(trial, "formula").as_deref(), Some("\"Cu2O\""));
+        Ok(())
+    }
+
+    #[test]
+    fn json_user_attrs_must_be_json_texts() -> Result<()> {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let mut storage = new_storage_with_format(&logs, AttrFormat::Json)?;
+        let study_id = storage
+            .create_new_study("study", vec![Direction::Minimize])?
+            .id;
+        let mut attrs = Attrs::new();
+        attrs.insert(AttrKey::User("formula".into()), "Cu2O".to_string());
+        assert!(storage.set_study_attrs(study_id, attrs, false).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn user_attr_logs_are_readable_in_both_formats() -> Result<()> {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let mut plain = new_storage_with_format(&logs, AttrFormat::Plain)?;
+        let study_id = plain
+            .create_new_study("study", vec![Direction::Minimize])?
+            .id;
+        let plain_trial_id = plain.create_new_trial(study_id)?.id;
+        let mut attrs = Attrs::new();
+        attrs.insert(AttrKey::User("formula".into()), "Cu2O".to_string());
+        plain.set_trial_attrs(plain_trial_id, attrs, false)?;
+
+        let mut json = new_storage_with_format(&logs, AttrFormat::Json)?;
+        let json_trial_id = json.create_new_trial(study_id)?.id;
+        let mut attrs = Attrs::new();
+        attrs.insert(AttrKey::User("parents".into()), "[1, 2]".to_string());
+        attrs.insert(AttrKey::User("origin".into()), "\"mutation\"".to_string());
+        json.set_trial_attrs(json_trial_id, attrs, false)?;
+
+        // A log written by Optuna.
+        let mut fields = HashMap::new();
+        fields.insert("trial_id".to_string(), to_raw(&json_trial_id)?);
+        fields.insert(
+            "user_attr".to_string(),
+            RawValue::from_string(r#"{"opt_stats": {"n": 5}}"#.to_string()).unwrap(),
+        );
+        logs.lock().unwrap().push(JournalLog {
+            op_code: JournalOperation::SetTrialUserAttr as i32,
+            worker_id: "optuna-worker".to_string(),
+            fields,
+        });
+
+        let mut json = new_storage_with_format(&logs, AttrFormat::Json)?;
+        let trial = json.get_trial(plain_trial_id)?;
+        assert_eq!(user_attr(trial, "formula").as_deref(), Some("\"Cu2O\""));
+        let trial = json.get_trial(json_trial_id)?;
+        assert_eq!(user_attr(trial, "parents").as_deref(), Some("[1, 2]"));
+        assert_eq!(user_attr(trial, "origin").as_deref(), Some("\"mutation\""));
+        assert_eq!(
+            user_attr(trial, "opt_stats").as_deref(),
+            Some(r#"{"n": 5}"#)
+        );
+
+        let mut plain = new_storage_with_format(&logs, AttrFormat::Plain)?;
+        let trial = plain.get_trial(plain_trial_id)?;
+        assert_eq!(user_attr(trial, "formula").as_deref(), Some("Cu2O"));
+        let trial = plain.get_trial(json_trial_id)?;
+        assert_eq!(user_attr(trial, "parents").as_deref(), Some("[1, 2]"));
+        assert_eq!(user_attr(trial, "origin").as_deref(), Some("mutation"));
+        assert_eq!(
+            user_attr(trial, "opt_stats").as_deref(),
+            Some(r#"{"n": 5}"#)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn json_user_attrs_of_template_trials_are_raw_json() -> Result<()> {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let mut storage = new_storage_with_format(&logs, AttrFormat::Json)?;
+        let study_id = storage
+            .create_new_study("study", vec![Direction::Minimize])?
+            .id;
+        let mut template = PersistedTrial::new(0, study_id, 0);
+        template.state_values = TrialStateValues::Complete(vec![1.0]);
+        template
+            .attrs
+            .insert(AttrKey::User("generation".into()), "0".to_string());
+        template
+            .attrs
+            .insert(AttrKey::User("formula".into()), "\"TiO2\"".to_string());
+        let trial_id = storage
+            .create_new_trial_from_template(study_id, &template)?
+            .id;
+
+        let create_log = logs
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|log| log.op_code == JournalOperation::CreateTrial as i32)
+            .map(|log| log.fields["user_attrs"].get().to_string())
+            .unwrap();
+        let user_attrs: Value = serde_json::from_str(&create_log).unwrap();
+        assert_eq!(user_attrs["generation"], Value::from(0));
+        assert_eq!(user_attrs["formula"], Value::from("TiO2"));
+
+        let mut plain = new_storage_with_format(&logs, AttrFormat::Plain)?;
+        let trial = plain.get_trial(trial_id)?;
+        assert_eq!(user_attr(trial, "generation").as_deref(), Some("0"));
+        assert_eq!(user_attr(trial, "formula").as_deref(), Some("TiO2"));
+        Ok(())
+    }
+
+    #[test]
+    fn json_system_attrs_are_written_in_optuna_schema() -> Result<()> {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let mut storage = new_storage_with_format(&logs, AttrFormat::Json)?;
+        let study_id = storage
+            .create_new_study("study", vec![Direction::Minimize])?
+            .id;
+        // Category labels are written by Rustuna itself as JSON strings.
+        storage.set_category_labels(
+            study_id,
+            "color",
+            vec![CategoryLabel::String("red".to_string())],
+        )?;
+        let system_log = logs
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|log| log.op_code == JournalOperation::SetStudySystemAttr as i32)
+            .map(|log| log.fields["system_attr"].get().to_string())
+            .unwrap();
+        assert_eq!(system_log, r#"{"category_labels:color:0":"s:red"}"#);
+
+        for format in [AttrFormat::Json, AttrFormat::Plain] {
+            let mut reopened = new_storage_with_format(&logs, format)?;
+            assert_eq!(
+                reopened.get_category_labels(study_id, "color", 1)?,
+                Some(vec![CategoryLabel::String("red".to_string())])
+            );
+        }
         Ok(())
     }
 }

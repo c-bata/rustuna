@@ -439,7 +439,7 @@ impl Study {
         })?;
         let mut template = PersistedTrial::new(0, self.id, 0);
         template.state_values = TrialStateValues::Waiting;
-        let fixed_attrs = fixed_params_to_attrs(&params);
+        let fixed_attrs = fixed_params_to_attrs(&params, guard.attr_format());
         template.attrs.extend(fixed_attrs);
 
         if let Some(attrs) = user_attrs {
