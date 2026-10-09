@@ -3,16 +3,19 @@ use std::sync::{Arc, RwLock};
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyString};
+use pyo3::types::PyDict;
 use rustuna_core::attr::{
-    category_labels_to_attrs, get_category_labels, AttrKey, Attrs, CategoryLabel,
+    category_labels_to_attrs, get_category_labels, AttrFormat, AttrKey, Attrs, CategoryLabel,
 };
 use rustuna_core::distribution::Distribution;
 use rustuna_core::storage::Storage;
 use rustuna_core::trial::{PersistedTrial, Trial, TrialState, TrialStateValues};
 use rustuna_core::ErrorKind;
 
-use crate::attrs::{pyobj_to_attrs, AttrKind, AttrsDictView};
+use crate::attrs::{
+    decode_attr_value, encode_attr_value, parse_attr_format, pyobj_to_attrs,
+    pyobj_to_attrs_with_kind, storage_attr_format, AttrKind, AttrsDictView,
+};
 use crate::distribution::{
     category_label_to_pyobject, py_to_external_repr, pyobject_to_category_label, PyDistribution,
 };
@@ -70,18 +73,28 @@ fn internal_param_from_py(obj: &Bound<'_, PyAny>, distribution: &PyDistribution)
     .map_err(|e| PyValueError::new_err(format!("Failed to convert parameter value: {e}")))
 }
 
+/// Converts the user and system attributes passed from Python into the `format` representation.
 fn build_trial_attrs(
-    user_attrs: HashMap<String, String>,
-    system_attrs: HashMap<String, String>,
-) -> Attrs {
-    let mut trial_attrs = Attrs::with_capacity(user_attrs.len() + system_attrs.len());
-    for (key, value) in user_attrs {
-        trial_attrs.insert(AttrKey::User(key.into()), value);
+    user_attrs: Option<&Bound<'_, PyAny>>,
+    system_attrs: Option<&Bound<'_, PyAny>>,
+    format: AttrFormat,
+) -> PyResult<Attrs> {
+    let mut trial_attrs = Attrs::new();
+    if let Some(user_attrs) = user_attrs {
+        trial_attrs.extend(pyobj_to_attrs_with_kind(
+            user_attrs,
+            AttrKind::User,
+            format,
+        )?);
     }
-    for (key, value) in system_attrs {
-        trial_attrs.insert(AttrKey::System(key.into()), value);
+    if let Some(system_attrs) = system_attrs {
+        trial_attrs.extend(pyobj_to_attrs_with_kind(
+            system_attrs,
+            AttrKind::System,
+            format,
+        )?);
     }
-    trial_attrs
+    Ok(trial_attrs)
 }
 
 fn build_params(
@@ -112,7 +125,7 @@ fn study_attrs_from_distributions(distributions: &HashMap<String, PyDistribution
     let mut attrs = Attrs::new();
     for (name, distribution) in distributions {
         if let Some(labels) = &distribution.category_labels {
-            attrs.extend(category_labels_to_attrs(name, labels));
+            attrs.extend(category_labels_to_attrs(name, labels, AttrFormat::Plain));
         }
     }
     attrs
@@ -140,8 +153,8 @@ pub fn py_create_trial(
     values: Option<Vec<f64>>,
     params: Option<&Bound<'_, PyDict>>,
     distributions: Option<HashMap<String, PyDistribution>>,
-    user_attrs: Option<HashMap<String, String>>,
-    system_attrs: Option<HashMap<String, String>>,
+    user_attrs: Option<&Bound<'_, PyAny>>,
+    system_attrs: Option<&Bound<'_, PyAny>>,
     intermediate_values: Option<HashMap<u32, f64>>,
 ) -> PyResult<PyPersistedTrial> {
     let mut trial = PersistedTrial::new(0, 0, 0);
@@ -155,10 +168,9 @@ pub fn py_create_trial(
         .map(|(name, distribution)| (name, distribution.distribution))
         .collect();
     trial.intermediate_values = intermediate_values.unwrap_or_default();
-    trial.attrs = build_trial_attrs(
-        user_attrs.unwrap_or_default(),
-        system_attrs.unwrap_or_default(),
-    );
+    // Attributes accept any JSON-serializable value. The target storage is unknown here, so they
+    // are kept as JSON texts and converted when the trial is added to a storage.
+    trial.attrs = build_trial_attrs(user_attrs, system_attrs, AttrFormat::Json)?;
 
     let now = rustuna_core::internal::datetime::now_naive_utc();
     if matches!(state, PyTrialState::WAITING) {
@@ -170,7 +182,7 @@ pub fn py_create_trial(
     }
 
     trial.validate().map_err(err_to_exceptions)?;
-    Ok(PyPersistedTrial::new(trial, study_attrs))
+    Ok(PyPersistedTrial::new(trial, study_attrs, AttrFormat::Json))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -357,15 +369,25 @@ impl PyTrial {
         category_label_to_pyobject(py, &label).map(|b| b.unbind())
     }
     #[pyo3(signature = (key, value))]
-    pub fn set_user_attr(&mut self, key: &str, value: String) -> PyResult<()> {
+    pub fn set_user_attr(&mut self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let format = self.trial.attr_format().map_err(err_to_exceptions)?;
+        let value = encode_attr_value(value, format)?;
         self.trial.set_user_attr(key, value).map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to set user attr: {:?}", e.kind))
         })?;
         Ok(())
     }
 
-    fn set_user_attrs(&mut self, attrs: Py<PyAny>) -> PyResult<()> {
-        let user_attrs: HashMap<String, String> = Python::attach(|py| attrs.bind(py).extract())?;
+    fn set_user_attrs(&mut self, attrs: &Bound<'_, PyAny>) -> PyResult<()> {
+        let format = self.trial.attr_format().map_err(err_to_exceptions)?;
+        let user_attrs: HashMap<String, String> =
+            pyobj_to_attrs_with_kind(attrs, AttrKind::User, format)?
+                .into_iter()
+                .filter_map(|(key, value)| match key {
+                    AttrKey::User(k) => Some((k.to_string(), value)),
+                    AttrKey::System(_) => None,
+                })
+                .collect();
 
         self.trial.set_user_attrs(user_attrs).map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to set user attrs: {:?}", e.kind))
@@ -394,8 +416,13 @@ impl PyTrial {
     }
 
     #[getter]
-    pub fn user_attrs(&self) -> PyResult<HashMap<String, String>> {
-        Ok(self.trial.get_user_attrs())
+    pub fn user_attrs(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let format = self.trial.attr_format().map_err(err_to_exceptions)?;
+        let dict = PyDict::new(py);
+        for (key, value) in self.trial.get_user_attrs() {
+            dict.set_item(key, decode_attr_value(py, &value, format)?)?;
+        }
+        Ok(dict.unbind())
     }
 }
 
@@ -418,6 +445,9 @@ type TrialParams = Vec<(String, f64, Distribution)>;
 pub struct PyPersistedTrial {
     source: PyPersistedTrialSource,
     study_attrs: Option<Arc<Attrs>>,
+    // Representation of the user attribute values of an owned trial. Storage-backed trials use
+    // the format of their storage.
+    owned_attr_format: AttrFormat,
 }
 impl PyPersistedTrial {
     /// Create a PyPersistedTrial that owns all trial data including study_attrs.
@@ -425,10 +455,13 @@ impl PyPersistedTrial {
     /// Use this constructor when:
     /// - Constructing from Python via `__new__`
     /// - Retrieving a single trial where study_attrs are already available
-    pub fn new(trial: PersistedTrial, study_attrs: Attrs) -> Self {
+    ///
+    /// `attr_format` is the representation of the user attribute values in `trial`.
+    pub fn new(trial: PersistedTrial, study_attrs: Attrs, attr_format: AttrFormat) -> Self {
         PyPersistedTrial {
             source: PyPersistedTrialSource::Owned(Box::new(trial)),
             study_attrs: Some(Arc::new(study_attrs)),
+            owned_attr_format: attr_format,
         }
     }
     /// Create a lightweight PyPersistedTrial that caches frequently accessed fields
@@ -451,7 +484,30 @@ impl PyPersistedTrial {
                 state,
             },
             study_attrs: None,
+            owned_attr_format: AttrFormat::Plain,
         }
+    }
+
+    /// Returns the representation of the user attribute values of this trial.
+    pub fn attr_format(&self) -> PyResult<AttrFormat> {
+        match &self.source {
+            PyPersistedTrialSource::Owned(_) => Ok(self.owned_attr_format),
+            PyPersistedTrialSource::StorageBacked { storage, .. } => storage_attr_format(storage),
+        }
+    }
+
+    /// Returns a copy of the trial whose user attribute values are converted to `format`.
+    ///
+    /// This is used when the trial is passed to a storage, e.g. as a template.
+    pub fn to_persisted_trial(&self, format: AttrFormat) -> PyResult<PersistedTrial> {
+        let current = self.attr_format()?;
+        let mut trial = self.with_trial(|t| Ok(t.clone()))?;
+        if current != format {
+            for value in trial.attrs.values_mut() {
+                *value = current.convert(value, format);
+            }
+        }
+        Ok(trial)
     }
 
     pub fn with_trial<R>(&self, f: impl FnOnce(&PersistedTrial) -> PyResult<R>) -> PyResult<R> {
@@ -523,7 +579,7 @@ impl PyPersistedTrial {
 #[pymethods]
 impl PyPersistedTrial {
     #[new]
-    #[pyo3(signature = (*, trial_id, study_id, number, state, value=None, values=None, params=None, distributions=None, user_attrs=None, system_attrs=None, intermediate_values=None, datetime_start=None, datetime_complete=None))]
+    #[pyo3(signature = (*, trial_id, study_id, number, state, value=None, values=None, params=None, distributions=None, user_attrs=None, system_attrs=None, intermediate_values=None, datetime_start=None, datetime_complete=None, attrs_format="str"))]
     #[allow(clippy::too_many_arguments)]
     pub fn py_new(
         trial_id: u32,
@@ -534,12 +590,16 @@ impl PyPersistedTrial {
         values: Option<Vec<f64>>,
         params: Option<&Bound<'_, PyDict>>,
         distributions: Option<HashMap<String, PyDistribution>>,
-        user_attrs: Option<HashMap<String, String>>,
-        system_attrs: Option<HashMap<String, String>>,
+        user_attrs: Option<&Bound<'_, PyAny>>,
+        system_attrs: Option<&Bound<'_, PyAny>>,
         intermediate_values: Option<HashMap<u32, f64>>,
         datetime_start: Option<Bound<'_, PyAny>>,
         datetime_complete: Option<Bound<'_, PyAny>>,
+        attrs_format: &str,
     ) -> PyResult<Self> {
+        // With "json", attributes accept any JSON-serializable value. With "str", the values are
+        // the plain strings stored by the storage.
+        let attr_format = parse_attr_format(attrs_format)?;
         let mut trial = PersistedTrial::new(trial_id, study_id, number);
         trial.state_values = state_values_from_py(&state, value, values)?;
 
@@ -551,10 +611,7 @@ impl PyPersistedTrial {
             .map(|(name, dist)| (name, dist.distribution))
             .collect();
         trial.intermediate_values = intermediate_values.unwrap_or_default();
-        trial.attrs = build_trial_attrs(
-            user_attrs.unwrap_or_default(),
-            system_attrs.unwrap_or_default(),
-        );
+        trial.attrs = build_trial_attrs(user_attrs, system_attrs, attr_format)?;
         trial.datetime_start = datetime_start
             .as_ref()
             .map(py_datetime_to_naive_utc)
@@ -565,7 +622,7 @@ impl PyPersistedTrial {
             .transpose()?;
 
         trial.validate().map_err(err_to_exceptions)?;
-        Ok(PyPersistedTrial::new(trial, study_attrs))
+        Ok(PyPersistedTrial::new(trial, study_attrs, attr_format))
     }
 
     #[getter(_trial_id)]
@@ -688,32 +745,40 @@ impl PyPersistedTrial {
 
     #[getter]
     fn user_attrs(&self) -> PyResult<AttrsDictView> {
+        let format = self.attr_format()?;
         match &self.source {
-            PyPersistedTrialSource::Owned(trial) => {
-                Ok(AttrsDictView::from_trial(trial.as_ref(), AttrKind::User))
-            }
+            PyPersistedTrialSource::Owned(trial) => Ok(AttrsDictView::from_trial(
+                trial.as_ref(),
+                AttrKind::User,
+                format,
+            )),
             PyPersistedTrialSource::StorageBacked {
                 storage, trial_id, ..
             } => Ok(AttrsDictView::from_storage(
                 storage.clone(),
                 *trial_id,
                 AttrKind::User,
+                format,
             )),
         }
     }
 
     #[getter]
     fn system_attrs(&self) -> PyResult<AttrsDictView> {
+        let format = self.attr_format()?;
         match &self.source {
-            PyPersistedTrialSource::Owned(trial) => {
-                Ok(AttrsDictView::from_trial(trial.as_ref(), AttrKind::System))
-            }
+            PyPersistedTrialSource::Owned(trial) => Ok(AttrsDictView::from_trial(
+                trial.as_ref(),
+                AttrKind::System,
+                format,
+            )),
             PyPersistedTrialSource::StorageBacked {
                 storage, trial_id, ..
             } => Ok(AttrsDictView::from_storage(
                 storage.clone(),
                 *trial_id,
                 AttrKind::System,
+                format,
             )),
         }
     }
@@ -766,13 +831,16 @@ impl PyPersistedTrial {
             }
         };
         match result {
-            Ok(value) => match decoder {
-                Some(decoder) => {
-                    let decoded = decoder.call1(py, (&value,))?;
-                    Ok(decoded)
+            // `decoder` is applied to the decoded value. In the plain format, this is the stored
+            // string; in the JSON format, values stored with `json.dumps` by the caller are strings,
+            // so `decoder=json.loads` keeps working.
+            Ok(value) => {
+                let value = decode_attr_value(py, &value, self.attr_format()?)?;
+                match decoder {
+                    Some(decoder) => decoder.call1(py, (value,)),
+                    None => Ok(value),
                 }
-                None => Ok(PyString::new(py, &value).into_any().unbind()),
-            },
+            }
             Err(e) if matches!(e.kind, ErrorKind::AttrNotFound) => {
                 Ok(default.unwrap_or_else(|| py.None()))
             }
@@ -868,9 +936,12 @@ fn py_datetime_to_naive_utc(value: &Bound<'_, PyAny>) -> PyResult<String> {
         .extract()
 }
 
+/// Converts a trial returned by a Python storage. `format` is the representation of the
+/// attribute values exposed by the Python object; see [`pyobj_to_attrs`].
 pub fn pyobject_to_persisted_trial_with_category_labels(
     trial: &Bound<'_, PyAny>,
     study_id: u32,
+    format: AttrFormat,
 ) -> PyResult<(PersistedTrial, Attrs)> {
     let trial_id = match trial.getattr("id") {
         Ok(attr) => attr.extract::<u32>()?,
@@ -942,7 +1013,7 @@ pub fn pyobject_to_persisted_trial_with_category_labels(
         let key = key.extract::<String>()?;
         let value = value.extract::<PyDistribution>()?;
         if let Some(labels) = &value.category_labels {
-            category_attrs.extend(category_labels_to_attrs(&key, labels));
+            category_attrs.extend(category_labels_to_attrs(&key, labels, AttrFormat::Plain));
         }
         distributions.insert(key, value.into());
     }
@@ -950,6 +1021,6 @@ pub fn pyobject_to_persisted_trial_with_category_labels(
 
     let user_attrs = trial.getattr("user_attrs")?;
     let system_attrs = trial.getattr("system_attrs")?;
-    persisted_trial.attrs = pyobj_to_attrs(&user_attrs, &system_attrs)?;
+    persisted_trial.attrs = pyobj_to_attrs(&user_attrs, &system_attrs, format)?;
     Ok((persisted_trial, category_attrs))
 }

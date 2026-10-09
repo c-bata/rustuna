@@ -5,13 +5,14 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use pyo3::types::{PyDict, PyList};
-use rustuna_core::attr::{AttrKey, Attrs, CategoryLabel};
+use rustuna_core::attr::{AttrFormat, AttrKey, Attrs, CategoryLabel};
 use rustuna_core::distribution::Distribution;
 use rustuna_core::storage::{InMemoryStorage, Storage};
 use rustuna_core::study::{Direction, PersistedStudy};
 use rustuna_core::trial::{PersistedTrial, TrialState, TrialStateValues};
 use rustuna_core::{Error, ErrorKind};
 
+use crate::attrs::decode_attr_value;
 use crate::distribution::PyDistribution;
 use crate::exception::err_to_exceptions;
 use crate::study::{pyobject_to_persisted_study, PyDirection};
@@ -29,14 +30,27 @@ use crate::trial::{
 // returning cached data.
 pub struct ToRustStorage {
     obj: Py<PyAny>,
+    // A Python storage may declare `attrs_format = "json"` to receive and return user
+    // attribute values as JSON texts. Otherwise they are plain strings.
+    attr_format: AttrFormat,
     cache: InMemoryStorage,
     cache_study_to_src_study: HashMap<u32, u32>,
     src_study_to_cache_study: HashMap<u32, u32>,
 }
 impl ToRustStorage {
     pub fn new(obj: Py<PyAny>) -> Self {
+        let attr_format = Python::attach(|py| {
+            match obj
+                .getattr(py, "attrs_format")
+                .and_then(|format| format.extract::<String>(py))
+            {
+                Ok(format) if format == "json" => AttrFormat::Json,
+                _ => AttrFormat::Plain,
+            }
+        });
         ToRustStorage {
             obj,
+            attr_format,
             cache: InMemoryStorage::new(),
             cache_study_to_src_study: HashMap::new(),
             src_study_to_cache_study: HashMap::new(),
@@ -97,7 +111,7 @@ impl ToRustStorage {
         Python::attach(|py| {
             let py_trial = self.obj.call_method1(py, "create_new_trial", (study_id,))?;
             let py_trial = py_trial.bind(py);
-            pyobject_to_persisted_trial_with_category_labels(py_trial, study_id)
+            pyobject_to_persisted_trial_with_category_labels(py_trial, study_id, self.attr_format)
         })
     }
 
@@ -107,12 +121,15 @@ impl ToRustStorage {
         template: &PersistedTrial,
     ) -> PyResult<(PersistedTrial, Attrs)> {
         Python::attach(|py| {
-            let py_template = Py::new(py, PyPersistedTrial::new(template.clone(), Attrs::new()))?;
+            let py_template = Py::new(
+                py,
+                PyPersistedTrial::new(template.clone(), Attrs::new(), self.attr_format),
+            )?;
             let py_trial =
                 self.obj
                     .call_method1(py, "create_new_trial", (study_id, py_template))?;
             let py_trial = py_trial.bind(py);
-            pyobject_to_persisted_trial_with_category_labels(py_trial, study_id)
+            pyobject_to_persisted_trial_with_category_labels(py_trial, study_id, self.attr_format)
         })
     }
 
@@ -189,10 +206,12 @@ impl ToRustStorage {
             for (k, v) in attrs.into_iter() {
                 match k {
                     AttrKey::System(k) => {
-                        py_system_attrs.set_item(k.as_str(), v)?;
+                        py_system_attrs
+                            .set_item(k.as_str(), decode_attr_value(py, &v, self.attr_format)?)?;
                     }
                     AttrKey::User(k) => {
-                        py_user_attrs.set_item(k.as_str(), v)?;
+                        py_user_attrs
+                            .set_item(k.as_str(), decode_attr_value(py, &v, self.attr_format)?)?;
                     }
                 }
             }
@@ -228,10 +247,12 @@ impl ToRustStorage {
             for (k, v) in attrs.into_iter() {
                 match k {
                     AttrKey::System(k) => {
-                        py_system_attrs.set_item(k.as_str(), v)?;
+                        py_system_attrs
+                            .set_item(k.as_str(), decode_attr_value(py, &v, self.attr_format)?)?;
                     }
                     AttrKey::User(k) => {
-                        py_user_attrs.set_item(k.as_str(), v)?;
+                        py_user_attrs
+                            .set_item(k.as_str(), decode_attr_value(py, &v, self.attr_format)?)?;
                     }
                 }
             }
@@ -247,7 +268,7 @@ impl ToRustStorage {
         Python::attach(|py| {
             let study = self.obj.call_method1(py, "get_study", (study_id,))?;
             let study = study.bind(py);
-            pyobject_to_persisted_study(study)
+            pyobject_to_persisted_study(study, self.attr_format)
         })
     }
 
@@ -261,7 +282,7 @@ impl ToRustStorage {
             let studies = studies_ref.cast::<PyList>()?;
             let mut persisted_studies: Vec<PersistedStudy> = Vec::with_capacity(studies.len());
             for study in studies.iter() {
-                persisted_studies.push(pyobject_to_persisted_study(&study)?);
+                persisted_studies.push(pyobject_to_persisted_study(&study, self.attr_format)?);
             }
             Ok(persisted_studies)
         })
@@ -279,7 +300,9 @@ impl ToRustStorage {
                 Vec::with_capacity(trials.len());
             for trial in trials.iter() {
                 persisted_trials.push(pyobject_to_persisted_trial_with_category_labels(
-                    &trial, study_id,
+                    &trial,
+                    study_id,
+                    self.attr_format,
                 )?);
             }
             Ok(persisted_trials)
@@ -803,6 +826,10 @@ impl Storage for ToRustStorage {
                 .map_err(Self::map_pyerr)?;
             Ok(())
         })
+    }
+
+    fn attr_format(&self) -> AttrFormat {
+        self.attr_format
     }
 
     fn may_omit_trials(&self) -> bool {

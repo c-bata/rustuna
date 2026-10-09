@@ -1,4 +1,5 @@
 use crate::string_interner::InternedString;
+use crate::{Error, ErrorKind, Result};
 use std::collections::HashMap;
 
 /// Attribute map used by studies and trials.
@@ -8,6 +9,110 @@ use std::collections::HashMap;
 /// Unlike Optuna, which accepts arbitrary JSON-serializable values, Rustuna stores attribute
 /// values as strings.
 pub type Attrs = HashMap<AttrKey, String>;
+
+/// Replaces Python's non-standard `NaN` and `Infinity` tokens outside strings with `0`.
+fn replace_non_finite_tokens(value: &str) -> std::borrow::Cow<'_, str> {
+    if !value.contains("NaN") && !value.contains("Infinity") {
+        return std::borrow::Cow::Borrowed(value);
+    }
+    let mut replaced = String::with_capacity(value.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut rest = value;
+    while let Some(c) = rest.chars().next() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+        } else if c == '"' {
+            in_string = true;
+        } else if let Some(token) = ["NaN", "Infinity"].iter().find(|t| rest.starts_with(*t)) {
+            replaced.push('0');
+            rest = &rest[token.len()..];
+            continue;
+        }
+        replaced.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    std::borrow::Cow::Owned(replaced)
+}
+
+/// Representation of attribute values in a storage.
+///
+/// Attribute values are plain strings by default. With [`AttrFormat::Json`], every value is a
+/// JSON text, which is the representation used by Optuna (`value_json` in `RDBStorage` and the
+/// raw JSON values in `JournalStorage`). This allows Optuna and Rustuna to read each other's
+/// studies. Storages currently apply this format to user attributes only; see
+/// [`crate::storage::Storage::attr_format`].
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum AttrFormat {
+    /// Attribute values are plain strings.
+    #[default]
+    Plain,
+    /// Attribute values are JSON texts compatible with Optuna.
+    Json,
+}
+
+impl AttrFormat {
+    /// Encodes a plain string written by Rustuna itself (e.g. internal system attributes such
+    /// as category labels) into this representation. Readers decode it with [`json_to_plain`],
+    /// which returns plain strings unchanged.
+    pub fn encode_plain(self, value: String) -> String {
+        match self {
+            AttrFormat::Plain => value,
+            AttrFormat::Json => plain_to_json(&value),
+        }
+    }
+
+    /// Converts an attribute value from `self` to the `to` representation.
+    pub fn convert(self, value: &str, to: AttrFormat) -> String {
+        match (self, to) {
+            (AttrFormat::Plain, AttrFormat::Json) => plain_to_json(value),
+            (AttrFormat::Json, AttrFormat::Plain) => json_to_plain(value),
+            _ => value.to_string(),
+        }
+    }
+}
+
+/// Encodes a plain attribute value as a JSON string.
+pub fn plain_to_json(value: &str) -> String {
+    serde_json::to_string(value).expect("serializing a string never fails")
+}
+
+/// Converts a JSON attribute value to a plain string.
+///
+/// JSON strings are unquoted. Other JSON values (numbers, booleans, null, arrays and objects) are
+/// returned as their JSON text. Invalid JSON is returned as-is.
+pub fn json_to_plain(value: &str) -> String {
+    if value.starts_with('"') {
+        if let Ok(s) = serde_json::from_str::<String>(value) {
+            return s;
+        }
+    }
+    value.to_string()
+}
+
+/// Returns an error if `value` is not a valid JSON text.
+///
+/// Like Python's `json` module (and therefore Optuna), the non-standard `NaN`, `Infinity` and
+/// `-Infinity` tokens are accepted.
+pub fn validate_json(value: &str) -> Result<()> {
+    serde_json::from_str::<serde::de::IgnoredAny>(&replace_non_finite_tokens(value))
+        .map(|_| ())
+        .map_err(|e| {
+            Error::with_reason(
+                ErrorKind::StorageError,
+                format!(
+                    "Attribute values must be JSON texts when the attribute format is JSON: \
+                     value={value:?}, error={e}"
+                ),
+            )
+        })
+}
 
 /// Distinguishes between user and system attributes.
 #[derive(Eq, Hash, Clone, Debug, PartialEq)]
@@ -89,12 +194,16 @@ pub(crate) fn system_key_category_label(param_name: &str, choice_idx: usize) -> 
     AttrKey::System(format!("category_labels:{param_name}:{choice_idx}").into())
 }
 
-/// Encodes categorical labels into system attributes.
-pub fn category_labels_to_attrs(param_name: &str, labels: &[CategoryLabel]) -> Attrs {
+/// Encodes categorical labels into system attributes in the given representation.
+pub fn category_labels_to_attrs(
+    param_name: &str,
+    labels: &[CategoryLabel],
+    format: AttrFormat,
+) -> Attrs {
     let mut attrs = Attrs::new();
     for (i, label) in labels.iter().enumerate() {
         let key = system_key_category_label(param_name, i);
-        attrs.insert(key, label.serialize().clone());
+        attrs.insert(key, format.encode_plain(label.serialize()));
     }
     attrs
 }
@@ -110,7 +219,7 @@ pub fn get_category_labels(
         let key = system_key_category_label(param_name, i);
         {
             let label = attrs.get(&key)?;
-            let label = CategoryLabel::deserialize(label)?;
+            let label = CategoryLabel::deserialize(&json_to_plain(label))?;
             labels.push(label);
         }
     }
@@ -122,12 +231,15 @@ pub(crate) fn system_key_fixed_param(param_name: &str) -> AttrKey {
     AttrKey::System(format!("fixed_params:{param_name}").into())
 }
 
-/// Encodes fixed parameter values into trial attributes.
-pub(crate) fn fixed_params_to_attrs(params: &HashMap<String, CategoryLabel>) -> Attrs {
+/// Encodes fixed parameter values into trial attributes in the given representation.
+pub(crate) fn fixed_params_to_attrs(
+    params: &HashMap<String, CategoryLabel>,
+    format: AttrFormat,
+) -> Attrs {
     let mut attrs = Attrs::new();
     for (name, value) in params {
         let key = system_key_fixed_param(name);
-        attrs.insert(key, value.serialize());
+        attrs.insert(key, format.encode_plain(value.serialize()));
     }
     attrs
 }
@@ -138,7 +250,7 @@ pub(crate) fn extract_fixed_params(attrs: &Attrs) -> HashMap<String, CategoryLab
     for (key, value) in attrs {
         if let AttrKey::System(s) = key {
             if let Some(param_name) = s.as_str().strip_prefix("fixed_params:") {
-                if let Some(label) = CategoryLabel::deserialize(value) {
+                if let Some(label) = CategoryLabel::deserialize(&json_to_plain(value)) {
                     params.insert(param_name.to_string(), label);
                 }
             }
@@ -176,5 +288,42 @@ mod tests {
         let serialized = format!("f:{value}");
         let deserialized = CategoryLabel::deserialize(&serialized).unwrap();
         assert_eq!(deserialized, CategoryLabel::Float(value));
+    }
+
+    #[test]
+    fn attr_format_plain_and_json_round_trip() {
+        assert_eq!(plain_to_json("Cu2O"), "\"Cu2O\"");
+        assert_eq!(json_to_plain("\"Cu2O\""), "Cu2O");
+        assert_eq!(json_to_plain("3"), "3");
+        assert_eq!(json_to_plain("[1, 2]"), "[1, 2]");
+        assert_eq!(json_to_plain("not json"), "not json");
+        for plain in ["", "abc", "123", "null", "\"quoted\"", "日本語"] {
+            assert_eq!(json_to_plain(&plain_to_json(plain)), plain);
+        }
+    }
+
+    #[test]
+    fn attr_format_validate_json() {
+        assert!(validate_json("NaN").is_ok());
+        assert!(validate_json("[Infinity, -Infinity]").is_ok());
+        assert!(validate_json("\"NaN\"").is_ok());
+        assert!(validate_json("NaNa").is_err());
+        assert!(validate_json("\"Cu2O\"").is_ok());
+        assert!(validate_json("{\"a\": [1, null]}").is_ok());
+        assert!(validate_json("Cu2O").is_err());
+        assert!(validate_json("").is_err());
+    }
+
+    #[test]
+    fn attr_format_convert() {
+        assert_eq!(AttrFormat::Plain.convert("abc", AttrFormat::Plain), "abc");
+        assert_eq!(
+            AttrFormat::Plain.convert("abc", AttrFormat::Json),
+            "\"abc\""
+        );
+        assert_eq!(
+            AttrFormat::Json.convert("\"abc\"", AttrFormat::Plain),
+            "abc"
+        );
     }
 }

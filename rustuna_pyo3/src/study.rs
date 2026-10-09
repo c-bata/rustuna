@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyFloat, PyInt, PyIterator, PyString, PyType};
+use pyo3::types::{PyDict, PyFloat, PyInt, PyIterator, PyType};
 use pyo3::{PyTypeInfo, Python};
 
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyUserWarning, PyValueError};
@@ -7,7 +7,7 @@ use rustuna_core::ErrorKind;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use rustuna_core::attr::AttrKey;
+use rustuna_core::attr::{AttrFormat, AttrKey};
 use rustuna_core::sampler::Sampler;
 use rustuna_core::storage::Storage;
 use rustuna_core::study::{
@@ -17,7 +17,10 @@ use rustuna_core::trial::TrialStateValues;
 use rustuna_sampler::tpe::TpeSampler;
 
 use crate::attrs::pyobj_to_attrs;
-use crate::attrs::{convert_pydict_to_fixed_params, pyobj_to_attrs_with_kind, AttrKind};
+use crate::attrs::{
+    convert_pydict_to_fixed_params, decode_attr_value, encode_attr_value, parse_attr_format,
+    pyobj_to_attrs_with_kind, storage_attr_format, AttrKind,
+};
 use crate::exception::err_to_exceptions;
 use crate::sampler::cmaes::PyCmaEsSampler;
 use crate::sampler::nsgaii::PyNsgaiiSampler;
@@ -555,8 +558,9 @@ impl PyStudy {
         user_attrs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
         let fixed_params = convert_pydict_to_fixed_params(params)?;
+        let format = storage_attr_format(&self.study.storage)?;
         let user_attrs_opt = user_attrs
-            .map(|d| pyobj_to_attrs_with_kind(d.as_any(), AttrKind::User))
+            .map(|d| pyobj_to_attrs_with_kind(d.as_any(), AttrKind::User, format))
             .transpose()?;
         self.study
             .enqueue_trial(fixed_params, user_attrs_opt)
@@ -566,7 +570,8 @@ impl PyStudy {
 
     pub fn add_trial(&self, trial: &Bound<'_, PyPersistedTrial>) -> PyResult<()> {
         // Extract the underlying PersistedTrial
-        let persisted_trial = trial.borrow().with_trial(|t| Ok(t.clone()))?;
+        let format = storage_attr_format(&self.study.storage)?;
+        let persisted_trial = trial.borrow().to_persisted_trial(format)?;
 
         // Call the core implementation
         self.study
@@ -577,9 +582,10 @@ impl PyStudy {
     }
 
     #[pyo3(signature = (key, value))]
-    pub fn set_user_attr(&self, key: String, value: String) -> PyResult<()> {
+    pub fn set_user_attr(&self, key: String, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let format = storage_attr_format(&self.study.storage)?;
         let mut attrs = rustuna_core::attr::Attrs::new();
-        attrs.insert(AttrKey::User(key.into()), value);
+        attrs.insert(AttrKey::User(key.into()), encode_attr_value(value, format)?);
         let mut guard = self.study.storage.write().map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to acquire the storage guard: {e:?}"))
         })?;
@@ -590,9 +596,10 @@ impl PyStudy {
     }
 
     fn set_user_attrs(&mut self, attrs: Py<PyAny>) -> PyResult<()> {
+        let format = storage_attr_format(&self.study.storage)?;
         let user_attrs = Python::attach(|py| {
             let attrs = attrs.bind(py);
-            pyobj_to_attrs_with_kind(attrs, AttrKind::User)
+            pyobj_to_attrs_with_kind(attrs, AttrKind::User, format)
         })?;
         let mut guard = self.study.storage.write().map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to acquire the storage guard: {e:?}"))
@@ -618,13 +625,17 @@ impl PyStudy {
             guard.get_study_attr(self.study.id, AttrKey::User(key.into()))
         };
         match result {
-            Ok(value) => match decoder {
-                Some(decoder) => {
-                    let decoded = decoder.call1(py, (&value,))?;
-                    Ok(decoded)
+            // `decoder` is applied to the decoded value. In the plain format, this is the stored
+            // string; in the JSON format, values stored with `json.dumps` by the caller are strings,
+            // so `decoder=json.loads` keeps working.
+            Ok(value) => {
+                let format = storage_attr_format(&self.study.storage)?;
+                let value = decode_attr_value(py, &value, format)?;
+                match decoder {
+                    Some(decoder) => decoder.call1(py, (value,)),
+                    None => Ok(value),
                 }
-                None => Ok(PyString::new(py, &value).into_any().unbind()),
-            },
+            }
             Err(e) if matches!(e.kind, ErrorKind::AttrNotFound) => {
                 Ok(default.unwrap_or_else(|| py.None()))
             }
@@ -703,7 +714,8 @@ impl PyStudy {
     }
 
     #[getter]
-    pub fn user_attrs(&self) -> PyResult<HashMap<String, String>> {
+    pub fn user_attrs(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let format = storage_attr_format(&self.study.storage)?;
         let mut guard = self
             .study
             .storage
@@ -712,13 +724,13 @@ impl PyStudy {
         let study = guard
             .get_study(self.study.id)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to get study: {:?}", e.kind)))?;
-        let mut user_attrs = HashMap::new();
+        let user_attrs = PyDict::new(py);
         for (key, value) in &study.attrs {
             if let AttrKey::User(k) = key {
-                user_attrs.insert(k.to_string(), value.clone());
+                user_attrs.set_item(k.as_str(), decode_attr_value(py, value, format)?)?;
             }
         }
-        Ok(user_attrs)
+        Ok(user_attrs.unbind())
     }
 
     #[getter(_study_id)]
@@ -926,13 +938,29 @@ pub fn py_copy_study(
 
 #[derive(Debug, Clone)]
 #[pyclass(name = "PersistedStudy", skip_from_py_object)]
-#[pyo3(module = "rustuna", get_all, set_all)]
+#[pyo3(module = "rustuna")]
 pub struct PyPersistedStudy {
+    #[pyo3(get, set)]
     pub id: u32,
+    #[pyo3(get, set)]
     pub name: String,
+    #[pyo3(get, set)]
     pub directions: Vec<PyDirection>,
-    pub user_attrs: HashMap<String, String>,
-    pub system_attrs: HashMap<String, String>,
+    /// User attribute values as stored in the storage. Exposed through the `user_attrs`
+    /// property, which decodes them according to `attr_format`.
+    pub raw_user_attrs: HashMap<String, String>,
+    /// System attribute values as stored in the storage. See `raw_user_attrs`.
+    pub raw_system_attrs: HashMap<String, String>,
+    pub attr_format: AttrFormat,
+}
+
+impl PyPersistedStudy {
+    /// Converts a persisted study whose user attribute values are represented in `format`.
+    pub fn from_persisted(study: PersistedStudy, format: AttrFormat) -> Self {
+        let mut py_study = PyPersistedStudy::from(study);
+        py_study.attr_format = format;
+        py_study
+    }
 }
 impl From<PersistedStudy> for PyPersistedStudy {
     fn from(item: PersistedStudy) -> Self {
@@ -955,8 +983,9 @@ impl From<PersistedStudy> for PyPersistedStudy {
             id: item.id,
             name: item.name,
             directions,
-            user_attrs,
-            system_attrs,
+            raw_user_attrs: user_attrs,
+            raw_system_attrs: system_attrs,
+            attr_format: AttrFormat::Plain,
         }
     }
 }
@@ -965,21 +994,54 @@ impl From<PersistedStudy> for PyPersistedStudy {
 #[pymethods]
 impl PyPersistedStudy {
     #[new]
-    #[pyo3(signature = (id, name, directions, user_attrs=None, system_attrs=None))]
+    #[pyo3(signature = (id, name, directions, user_attrs=None, system_attrs=None, attrs_format="str"))]
     pub fn py_new(
         id: u32,
         name: String,
         directions: Vec<PyDirection>,
-        user_attrs: Option<HashMap<String, String>>,
-        system_attrs: Option<HashMap<String, String>>,
-    ) -> Self {
-        PyPersistedStudy {
+        user_attrs: Option<&Bound<'_, PyAny>>,
+        system_attrs: Option<&Bound<'_, PyAny>>,
+        attrs_format: &str,
+    ) -> PyResult<Self> {
+        // With "json", attributes accept any JSON-serializable value. With "str", the values are
+        // the plain strings stored by the storage.
+        let attr_format = parse_attr_format(attrs_format)?;
+        Ok(PyPersistedStudy {
             id,
             name,
             directions,
-            user_attrs: user_attrs.unwrap_or_default(),
-            system_attrs: system_attrs.unwrap_or_default(),
-        }
+            raw_user_attrs: user_attrs
+                .map(|attrs| encode_attrs(attrs, AttrKind::User, attr_format))
+                .transpose()?
+                .unwrap_or_default(),
+            raw_system_attrs: system_attrs
+                .map(|attrs| encode_attrs(attrs, AttrKind::System, attr_format))
+                .transpose()?
+                .unwrap_or_default(),
+            attr_format,
+        })
+    }
+
+    #[getter]
+    fn user_attrs(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        decode_attrs_to_pydict(py, &self.raw_user_attrs, self.attr_format)
+    }
+
+    #[setter]
+    fn set_user_attrs(&mut self, user_attrs: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.raw_user_attrs = encode_attrs(user_attrs, AttrKind::User, self.attr_format)?;
+        Ok(())
+    }
+
+    #[getter]
+    fn system_attrs(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        decode_attrs_to_pydict(py, &self.raw_system_attrs, self.attr_format)
+    }
+
+    #[setter]
+    fn set_system_attrs(&mut self, system_attrs: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.raw_system_attrs = encode_attrs(system_attrs, AttrKind::System, self.attr_format)?;
+        Ok(())
     }
 
     fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
@@ -991,12 +1053,42 @@ impl PyPersistedStudy {
     fn __str__(&self) -> PyResult<String> {
         Ok(format!(
             "id={} name={} user_attrs={:?} system_attrs={:?}",
-            self.id, self.name, self.user_attrs, self.system_attrs
+            self.id, self.name, self.raw_user_attrs, self.raw_system_attrs
         ))
     }
 }
 
-pub fn pyobject_to_persisted_study(study: &Bound<'_, PyAny>) -> PyResult<PersistedStudy> {
+fn decode_attrs_to_pydict(
+    py: Python<'_>,
+    attrs: &HashMap<String, String>,
+    format: AttrFormat,
+) -> PyResult<Py<PyDict>> {
+    let dict = PyDict::new(py);
+    for (key, value) in attrs {
+        dict.set_item(key, decode_attr_value(py, value, format)?)?;
+    }
+    Ok(dict.unbind())
+}
+
+fn encode_attrs(
+    attrs: &Bound<'_, PyAny>,
+    kind: AttrKind,
+    format: AttrFormat,
+) -> PyResult<HashMap<String, String>> {
+    Ok(pyobj_to_attrs_with_kind(attrs, kind, format)?
+        .into_iter()
+        .map(|(key, value)| match key {
+            AttrKey::User(k) | AttrKey::System(k) => (k.to_string(), value),
+        })
+        .collect())
+}
+
+/// Converts a study returned by a Python storage. See
+/// [`crate::trial::pyobject_to_persisted_trial_with_category_labels`] for `format`.
+pub fn pyobject_to_persisted_study(
+    study: &Bound<'_, PyAny>,
+    format: AttrFormat,
+) -> PyResult<PersistedStudy> {
     let study_id = study.getattr("id")?.extract::<u32>()?;
     let name = study.getattr("name")?.extract::<String>()?;
     let directions = study.getattr("directions")?.extract::<Vec<PyDirection>>()?;
@@ -1009,7 +1101,7 @@ pub fn pyobject_to_persisted_study(study: &Bound<'_, PyAny>) -> PyResult<Persist
             "user_attrs and system_attrs must be a dict",
         ));
     }
-    let attrs = pyobj_to_attrs(&user_attrs, &system_attrs)?;
+    let attrs = pyobj_to_attrs(&user_attrs, &system_attrs, format)?;
     Ok(PersistedStudy::new_with_attrs(
         study_id, name, directions, attrs,
     ))

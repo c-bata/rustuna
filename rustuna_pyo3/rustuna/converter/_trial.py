@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import copy
 import datetime
+import json
 import warnings
-from typing import TYPE_CHECKING, overload
+from typing import TYPE_CHECKING, Literal, overload
 
 import optuna
 from optuna import distributions
@@ -11,7 +12,7 @@ from optuna.trial import FrozenTrial
 
 import rustuna
 
-from ._attrs import to_optuna_attrs, to_rustuna_attrs
+from ._attrs import to_optuna_attrs, to_rustuna_attrs, to_rustuna_json_attrs
 from ._distribution import (
     to_optuna_distributions,
     to_rustuna_distribution,
@@ -59,12 +60,36 @@ def to_rustuna_state(state: optuna.trial.TrialState) -> rustuna.trial.TrialState
     return to_rustuna_state_map[state]
 
 
+def convert_attrs_to_rustuna(
+    user_attrs: dict[str, Any],
+    system_attrs: dict[str, Any],
+    attrs_format: Literal["marker", "json"],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Convert Optuna's user and system attrs. See :func:`to_persisted_trial`."""
+    if attrs_format == "marker":
+        return to_rustuna_attrs(user_attrs), to_rustuna_attrs(system_attrs)
+    return dict(user_attrs), to_rustuna_json_attrs(system_attrs)
+
+
 def to_persisted_trial(
     trial: optuna.trial.FrozenTrial,
     study_id: int,
+    *,
+    attrs_format: Literal["marker", "json"] = "marker",
 ) -> rustuna.trial.PersistedTrial:
-    """Convert an Optuna frozen trial to a Rustuna persisted trial."""
-    rustuna_system_attrs = to_rustuna_attrs(trial.system_attrs)
+    """Convert an Optuna frozen trial to a Rustuna persisted trial.
+
+    Args:
+        trial: The Optuna trial to convert.
+        study_id: The ID of the study in the Rustuna storage.
+        attrs_format: How attributes are passed to Rustuna. ``"marker"`` stores them as
+            strings with marker keys (for storages with ``attrs_format="str"``), and
+            ``"json"`` passes the values as they are (for storages with
+            ``attrs_format="json"``).
+    """
+    user_attrs, system_attrs = convert_attrs_to_rustuna(
+        trial.user_attrs, trial.system_attrs, attrs_format
+    )
 
     distributions: dict[str, Distribution] = {}
     for param_name in trial.distributions:
@@ -80,10 +105,11 @@ def to_persisted_trial(
         params=trial.params,
         distributions=distributions,
         intermediate_values=trial.intermediate_values,
-        user_attrs=to_rustuna_attrs(trial.user_attrs),
-        system_attrs=rustuna_system_attrs,
+        user_attrs=user_attrs,
+        system_attrs=system_attrs,
         datetime_start=trial.datetime_start,
         datetime_complete=trial.datetime_complete,
+        attrs_format="json" if attrs_format == "json" else "str",
     )
 
 
@@ -133,7 +159,7 @@ class FrozenTrialLike(FrozenTrial):
 
     @property
     def _trial_id(self) -> int:
-        return self._persisted_trial._trial_id
+        return self.__trial_id
 
     @_trial_id.setter
     def _trial_id(self, value: int) -> None:
