@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use rustuna_core::attr::{get_category_labels, AttrKey, Attrs, CategoryLabel};
+use rustuna_core::attr::{get_category_labels, AttrFormat, AttrKey, Attrs, CategoryLabel};
 use rustuna_core::distribution::Distribution;
 use rustuna_core::storage::Storage;
 use rustuna_core::study::{Direction, PersistedStudy};
@@ -12,6 +12,7 @@ use rustuna_core::trial::{PersistedTrial, TrialStateValues};
 use rustuna_core::{Error, ErrorKind};
 use rustuna_storage::cache::{CachedStorage, CachedStorageBackend, DiscardedTrialsDiff};
 
+use crate::attrs::parse_attr_format;
 use crate::distribution::pyobject_to_category_label;
 use crate::distribution::PyDistribution;
 use crate::storage::binding::StorageBinding;
@@ -22,11 +23,12 @@ use crate::trial::{
 
 pub(crate) struct PyCachedStorageBackend {
     obj: Py<PyAny>,
+    attr_format: AttrFormat,
 }
 
 impl PyCachedStorageBackend {
-    pub(crate) fn new(obj: Py<PyAny>) -> Self {
-        Self { obj }
+    pub(crate) fn new(obj: Py<PyAny>, attr_format: AttrFormat) -> Self {
+        Self { obj, attr_format }
     }
 
     fn map_pyerr(err: PyErr) -> Error {
@@ -56,19 +58,26 @@ impl PyCachedStorageBackend {
     }
 
     fn py_trial(py: Python<'_>, trial: PersistedTrial) -> PyResult<Py<PyAny>> {
-        Ok(Py::new(py, PyPersistedTrial::new(trial, Attrs::new()))?.into_any())
+        // The backend receives the values as stored, i.e. JSON texts in the JSON format.
+        Ok(Py::new(
+            py,
+            PyPersistedTrial::new(trial, Attrs::new(), AttrFormat::Plain),
+        )?
+        .into_any())
     }
 
     fn parse_trial(trial: &Bound<'_, PyAny>) -> PyResult<PersistedTrial> {
         pyobject_to_persisted_trial_with_category_labels(
             trial,
             trial.getattr("study_id")?.extract()?,
+            AttrFormat::Plain,
         )
         .map(|(trial, _)| trial)
     }
 
     fn parse_trial_for_study(trial: &Bound<'_, PyAny>, study_id: u32) -> PyResult<PersistedTrial> {
-        pyobject_to_persisted_trial_with_category_labels(trial, study_id).map(|(trial, _)| trial)
+        pyobject_to_persisted_trial_with_category_labels(trial, study_id, AttrFormat::Plain)
+            .map(|(trial, _)| trial)
     }
 
     fn parse_trials_for_study(
@@ -151,7 +160,7 @@ impl CachedStorageBackend for PyCachedStorageBackend {
             let study =
                 self.obj
                     .call_method1(py, "create_new_study", (study_name, py_directions))?;
-            pyobject_to_persisted_study(study.bind(py))
+            pyobject_to_persisted_study(study.bind(py), AttrFormat::Plain)
         })
         .map_err(Self::map_pyerr)
     }
@@ -204,7 +213,7 @@ impl CachedStorageBackend for PyCachedStorageBackend {
                     Some(labels)
                 } else {
                     let study = self.obj.call_method1(py, "get_study", (trial.study_id,))?;
-                    let study = pyobject_to_persisted_study(study.bind(py))?;
+                    let study = pyobject_to_persisted_study(study.bind(py), AttrFormat::Plain)?;
                     get_category_labels(&study.attrs, name, *cardinality)
                 }
             } else {
@@ -272,7 +281,7 @@ impl CachedStorageBackend for PyCachedStorageBackend {
             let studies = studies.bind(py).cast::<PyList>()?;
             studies
                 .iter()
-                .map(|study| pyobject_to_persisted_study(&study))
+                .map(|study| pyobject_to_persisted_study(&study, AttrFormat::Plain))
                 .collect::<PyResult<Vec<_>>>()
         })
         .map_err(Self::map_pyerr)
@@ -281,7 +290,7 @@ impl CachedStorageBackend for PyCachedStorageBackend {
     fn get_study(&mut self, study_id: u32) -> rustuna_core::Result<PersistedStudy> {
         Python::attach(|py| {
             let study = self.obj.call_method1(py, "get_study", (study_id,))?;
-            pyobject_to_persisted_study(study.bind(py))
+            pyobject_to_persisted_study(study.bind(py), AttrFormat::Plain)
         })
         .map_err(Self::map_pyerr)
     }
@@ -328,6 +337,10 @@ impl CachedStorageBackend for PyCachedStorageBackend {
     ) -> rustuna_core::Result<()> {
         Python::attach(|py| self.call_set_attrs(py, "set_trial_attrs", trial_id, &attrs))
             .map_err(Self::map_pyerr)
+    }
+
+    fn attr_format(&self) -> AttrFormat {
+        self.attr_format
     }
 
     fn apply_discard(&self) -> bool {
@@ -411,8 +424,9 @@ pub struct PyCachedStorage {
 }
 
 impl PyCachedStorage {
-    pub(crate) fn new(backend: Py<PyAny>) -> Self {
-        let storage = CachedStorage::new(Box::new(PyCachedStorageBackend::new(backend)));
+    pub(crate) fn new(backend: Py<PyAny>, attr_format: AttrFormat) -> Self {
+        let storage =
+            CachedStorage::new(Box::new(PyCachedStorageBackend::new(backend, attr_format)));
         Self {
             binding: StorageBinding::new(Arc::new(RwLock::new(storage))),
         }
@@ -426,8 +440,15 @@ impl PyCachedStorage {
 #[pymethods]
 impl PyCachedStorage {
     #[new]
-    fn py_new(backend: Py<PyAny>) -> Self {
-        Self::new(backend)
+    #[pyo3(signature = (backend, *, attrs_format = "json"))]
+    fn py_new(backend: Py<PyAny>, attrs_format: &str) -> PyResult<Self> {
+        Ok(Self::new(backend, parse_attr_format(attrs_format)?))
+    }
+
+    /// Representation of user attribute values: ``"json"`` or ``"str"``.
+    #[getter]
+    fn attrs_format(&self) -> PyResult<&'static str> {
+        self.binding.attrs_format_name()
     }
 
     fn create_new_study(
@@ -539,7 +560,12 @@ impl PyCachedStorage {
         self.binding.get_trial_number_from_id(py, trial_id)
     }
 
-    fn get_study_user_attr(&self, py: Python<'_>, study_id: u32, key: String) -> PyResult<String> {
+    fn get_study_user_attr(
+        &self,
+        py: Python<'_>,
+        study_id: u32,
+        key: String,
+    ) -> PyResult<Py<PyAny>> {
         self.binding.get_study_user_attr(py, study_id, key)
     }
 
@@ -548,7 +574,7 @@ impl PyCachedStorage {
         py: Python<'_>,
         study_id: u32,
         key: String,
-    ) -> PyResult<String> {
+    ) -> PyResult<Py<PyAny>> {
         self.binding.get_study_system_attr(py, study_id, key)
     }
 

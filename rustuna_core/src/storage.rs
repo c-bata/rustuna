@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::attr::{category_labels_to_attrs, get_category_labels, AttrKey, Attrs, CategoryLabel};
+use crate::attr::{
+    category_labels_to_attrs, get_category_labels, AttrFormat, AttrKey, Attrs, CategoryLabel,
+};
 use crate::datetime::now_naive_utc;
 use crate::distribution::Distribution;
 use crate::study::{Direction, PersistedStudy};
@@ -158,12 +160,23 @@ pub trait Storage: Send + Sync {
     fn get_n_trials(&mut self, study_id: u32, states: Option<&[TrialState]>) -> Result<u32>;
     fn discard_trials(&mut self, trial_ids: &[u32]) -> Result<()>;
     fn may_omit_trials(&self) -> bool;
+
+    /// Returns how user attribute values are represented in this storage.
+    ///
+    /// See [`AttrFormat`] for details. Storages that do not override this method store plain
+    /// strings.
+    fn attr_format(&self) -> AttrFormat {
+        AttrFormat::Plain
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 /// Options for [`InMemoryStorage`].
 pub struct InMemoryStorageOptions {
     pub apply_discard: bool,
+    /// Representation of user attribute values. The storage does not interpret the values; this
+    /// only tells the callers (e.g. the Python bindings) how to encode and decode them.
+    pub attr_format: AttrFormat,
 }
 
 /// In-memory storage implementation used by default in Rust code and tests.
@@ -517,7 +530,7 @@ impl Storage for InMemoryStorage {
         param_name: &str,
         labels: Vec<CategoryLabel>,
     ) -> Result<()> {
-        let attrs = category_labels_to_attrs(param_name, &labels);
+        let attrs = category_labels_to_attrs(param_name, &labels, self.option.attr_format);
         self.set_study_attrs(study_id, attrs, true)
     }
 
@@ -648,6 +661,10 @@ impl Storage for InMemoryStorage {
 
     fn may_omit_trials(&self) -> bool {
         self.option.apply_discard
+    }
+
+    fn attr_format(&self) -> AttrFormat {
+        self.option.attr_format
     }
 }
 
@@ -805,6 +822,7 @@ mod tests {
     fn delete_study_removes_discarded_trial_mappings() -> Result<()> {
         let mut storage = InMemoryStorage::new_with_option(InMemoryStorageOptions {
             apply_discard: true,
+            ..Default::default()
         });
         let study_id = storage
             .create_new_study("study", vec![Direction::Minimize])?
@@ -912,6 +930,7 @@ mod tests {
     fn discard_trials_omits_trials() -> Result<()> {
         let mut storage = InMemoryStorage::new_with_option(InMemoryStorageOptions {
             apply_discard: true,
+            ..Default::default()
         });
         let study_id = storage
             .create_new_study("study", vec![Direction::Minimize])?
@@ -935,6 +954,7 @@ mod tests {
     fn get_n_trials_counts_states() -> Result<()> {
         let mut storage = InMemoryStorage::new_with_option(InMemoryStorageOptions {
             apply_discard: true,
+            ..Default::default()
         });
         let study_id = storage
             .create_new_study("study", vec![Direction::Minimize])?

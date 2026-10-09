@@ -1,46 +1,171 @@
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
 use pyo3::class::basic::CompareOp;
-use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyTypeError};
+use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyIterator, PyList};
-use rustuna_core::attr::{AttrKey, Attrs, CategoryLabel};
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyDict, PyIterator, PyList, PyString};
+use rustuna_core::attr::{AttrFormat, AttrKey, Attrs, CategoryLabel};
 use rustuna_core::storage::Storage;
 
 use crate::exception::err_to_exceptions;
 
+static JSON_DUMPS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static JSON_LOADS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+// `get_trials()` recreates `PersistedTrial` objects on every call, and callers typically read the
+// same attributes of all trials repeatedly. Decoded JSON values are therefore cached by their text.
+// The cache key is the stored text itself, so no invalidation is needed when an attribute is
+// overwritten. Like Optuna's `get_trials(deepcopy=False)`, decoded objects are shared and must not
+// be mutated by callers.
+const DECODE_CACHE_CAPACITY: usize = 1 << 16;
+const DECODE_CACHE_MAX_TEXT_LEN: usize = 8 * 1024;
+static DECODE_CACHE: LazyLock<Mutex<HashMap<Box<str>, Py<PyAny>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn json_function<'py>(
+    py: Python<'py>,
+    cell: &'static PyOnceLock<Py<PyAny>>,
+    name: &str,
+) -> PyResult<&'py Bound<'py, PyAny>> {
+    let function = cell.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+        Ok(py.import("json")?.getattr(name)?.unbind())
+    })?;
+    Ok(function.bind(py))
+}
+
+/// Serializes a Python object with `json.dumps`, which is what Optuna uses.
+pub fn json_dumps(value: &Bound<'_, PyAny>) -> PyResult<String> {
+    let py = value.py();
+    json_function(py, &JSON_DUMPS, "dumps")?
+        .call1((value,))?
+        .extract::<String>()
+}
+
+/// Deserializes a JSON text with `json.loads`, using the decode cache.
+pub fn json_loads(py: Python<'_>, text: &str) -> PyResult<Py<PyAny>> {
+    let cacheable = text.len() <= DECODE_CACHE_MAX_TEXT_LEN;
+    if cacheable {
+        let cache = DECODE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(value) = cache.get(text) {
+            return Ok(value.clone_ref(py));
+        }
+    }
+    let value = json_function(py, &JSON_LOADS, "loads")?
+        .call1((text,))?
+        .unbind();
+    if cacheable {
+        let evicted = {
+            let mut cache = DECODE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            let evicted = if cache.len() >= DECODE_CACHE_CAPACITY {
+                std::mem::take(&mut *cache)
+            } else {
+                HashMap::new()
+            };
+            cache.insert(text.into(), value.clone_ref(py));
+            evicted
+        };
+        // Drop the evicted values after releasing the lock.
+        drop(evicted);
+    }
+    Ok(value)
+}
+
+/// Parses the `attrs_format` argument of the storage constructors.
+pub fn parse_attr_format(format: &str) -> PyResult<AttrFormat> {
+    match format {
+        "json" => Ok(AttrFormat::Json),
+        "str" => Ok(AttrFormat::Plain),
+        _ => Err(PyValueError::new_err(format!(
+            "attrs_format must be 'json' or 'str', but got {format:?}."
+        ))),
+    }
+}
+
+/// Returns the name of an attribute format used by the Python API.
+pub fn attr_format_name(format: AttrFormat) -> &'static str {
+    match format {
+        AttrFormat::Json => "json",
+        AttrFormat::Plain => "str",
+    }
+}
+
+/// Returns the user attribute format of a storage.
+pub fn storage_attr_format(storage: &Arc<RwLock<dyn Storage>>) -> PyResult<AttrFormat> {
+    let guard = storage.read().map_err(|e| {
+        PyRuntimeError::new_err(format!("Failed to acquire the storage guard: {e:?}"))
+    })?;
+    Ok(guard.attr_format())
+}
+
+/// Encodes a Python attribute value into the string stored in a storage.
+pub fn encode_attr_value(value: &Bound<'_, PyAny>, format: AttrFormat) -> PyResult<String> {
+    match format {
+        AttrFormat::Plain => value.extract::<String>().map_err(|_| {
+            PyTypeError::new_err(format!(
+                "Attribute values must be str when the attribute format is 'str', but got {}.",
+                value
+                    .get_type()
+                    .name()
+                    .map(|n| n.to_string())
+                    .unwrap_or_default()
+            ))
+        }),
+        AttrFormat::Json => json_dumps(value),
+    }
+}
+
+/// Decodes a string stored in a storage into a Python attribute value.
+pub fn decode_attr_value(py: Python<'_>, text: &str, format: AttrFormat) -> PyResult<Py<PyAny>> {
+    match format {
+        AttrFormat::Plain => Ok(PyString::new(py, text).into_any().unbind()),
+        AttrFormat::Json => json_loads(py, text),
+    }
+}
+
+/// Converts a mapping of Python attribute values into attributes.
+///
+/// `format` is the representation of the values to store; see [`encode_attr_value`].
 // TODO(c-bata): Consider removing the PyDict branch if there is no significant performance
 // difference. The Mapping protocol branch (else) can handle PyDict as well.
-pub fn pyobj_to_attrs_with_kind(obj: &Bound<'_, PyAny>, kind: AttrKind) -> PyResult<Attrs> {
+pub fn pyobj_to_attrs_with_kind(
+    obj: &Bound<'_, PyAny>,
+    kind: AttrKind,
+    format: AttrFormat,
+) -> PyResult<Attrs> {
     if obj.is_instance_of::<PyDict>() {
         // Fast path for PyDict: iterate directly without calling .items() method.
         let dict = obj.cast::<PyDict>()?;
         let mut attrs = Attrs::with_capacity(dict.len());
         for (key, value) in dict {
             let key = key.extract::<String>()?;
-            let value = value.extract::<String>()?;
+            let value = encode_attr_value(&value, format)?;
             attrs.insert(kind.to_key(&key), value);
         }
         Ok(attrs)
     } else {
         // TODO(c-bata): Add error handling if obj does not implement Mapping protocol.
         let items = obj.call_method0("items")?;
-        let items = items.extract::<Vec<(String, String)>>()?;
+        let items = items.extract::<Vec<(String, Bound<'_, PyAny>)>>()?;
         let mut attrs = Attrs::with_capacity(items.len());
         for (key, value) in items {
-            attrs.insert(kind.to_key(&key), value);
+            attrs.insert(kind.to_key(&key), encode_attr_value(&value, format)?);
         }
         Ok(attrs)
     }
 }
 
+/// Converts the attributes of a Python object implementing the storage protocol.
+///
+/// `format` is the representation of the values to store; see [`encode_attr_value`].
 pub fn pyobj_to_attrs(
     user_attrs: &Bound<'_, PyAny>,
     system_attrs: &Bound<'_, PyAny>,
+    format: AttrFormat,
 ) -> PyResult<Attrs> {
-    let user_attrs = pyobj_to_attrs_with_kind(user_attrs, AttrKind::User)?;
-    let system_attrs = pyobj_to_attrs_with_kind(system_attrs, AttrKind::System)?;
+    let user_attrs = pyobj_to_attrs_with_kind(user_attrs, AttrKind::User, format)?;
+    let system_attrs = pyobj_to_attrs_with_kind(system_attrs, AttrKind::System, format)?;
     let cap = user_attrs.len() + system_attrs.len();
     let mut attrs = Attrs::with_capacity(cap);
     for (key, value) in user_attrs {
@@ -82,14 +207,22 @@ enum AttrsDictViewSource {
     },
 }
 
+/// Read-only mapping of the user or system attributes of a trial.
+///
+/// Values are decoded according to `format` (see [`decode_attr_value`]).
 #[pyclass(name = "AttrsDictView")]
 pub struct AttrsDictView {
     source: AttrsDictViewSource,
     kind: AttrKind,
+    format: AttrFormat,
 }
 
 impl AttrsDictView {
-    pub fn from_trial(trial: &rustuna_core::trial::PersistedTrial, kind: AttrKind) -> Self {
+    pub fn from_trial(
+        trial: &rustuna_core::trial::PersistedTrial,
+        kind: AttrKind,
+        format: AttrFormat,
+    ) -> Self {
         let mut attrs = Attrs::new();
         for (key, value) in &trial.attrs {
             if kind.matches(key) {
@@ -99,14 +232,25 @@ impl AttrsDictView {
         AttrsDictView {
             source: AttrsDictViewSource::Owned(attrs),
             kind,
+            format,
         }
     }
 
-    pub fn from_storage(storage: Arc<RwLock<dyn Storage>>, trial_id: u32, kind: AttrKind) -> Self {
+    pub fn from_storage(
+        storage: Arc<RwLock<dyn Storage>>,
+        trial_id: u32,
+        kind: AttrKind,
+        format: AttrFormat,
+    ) -> Self {
         AttrsDictView {
             source: AttrsDictViewSource::StorageBacked { storage, trial_id },
             kind,
+            format,
         }
+    }
+
+    fn decode(&self, py: Python<'_>, text: &str) -> PyResult<Py<PyAny>> {
+        decode_attr_value(py, text, self.format)
     }
 
     fn with_attrs<R>(&self, f: impl FnOnce(&Attrs) -> PyResult<R>) -> PyResult<R> {
@@ -152,18 +296,16 @@ impl AttrsDictView {
     pub(crate) fn to_pydict(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
         let dict = PyDict::new(py);
         for (key, value) in self.collect_entries()? {
-            dict.set_item(key, value)?;
+            dict.set_item(key, self.decode(py, &value)?)?;
         }
         Ok(dict.unbind())
     }
 
     pub(crate) fn format_as_dict(&self) -> PyResult<String> {
-        let entries: Vec<String> = self
-            .collect_entries()?
-            .iter()
-            .map(|(k, v)| format!("'{k}': '{v}'"))
-            .collect();
-        Ok(format!("{{{}}}", entries.join(", ")))
+        Python::attach(|py| {
+            let dict = self.to_pydict(py)?;
+            Ok(dict.bind(py).repr()?.to_str()?.to_owned())
+        })
     }
 
     fn len(&self) -> PyResult<usize> {
@@ -184,9 +326,9 @@ impl AttrsDictView {
         Ok(iter.unbind().into())
     }
 
-    fn __getitem__(&self, key: &str) -> PyResult<String> {
+    fn __getitem__(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         match self.get_value(key)? {
-            Some(value) => Ok(value),
+            Some(value) => self.decode(py, &value),
             None => Err(PyKeyError::new_err(key.to_string())),
         }
     }
@@ -198,7 +340,7 @@ impl AttrsDictView {
     #[pyo3(signature = (key, default=None))]
     fn get(&self, py: Python<'_>, key: &str, default: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         match self.get_value(key)? {
-            Some(value) => Ok(value.into_pyobject(py)?.unbind().into()),
+            Some(value) => self.decode(py, &value),
             None => Ok(default.unwrap_or_else(|| py.None())),
         }
     }
@@ -220,20 +362,18 @@ impl AttrsDictView {
         })
     }
 
-    fn values(&self) -> PyResult<Vec<String>> {
-        self.with_attrs(|attrs| {
-            let mut values = Vec::new();
-            for (key, value) in attrs {
-                if self.kind.matches(key) {
-                    values.push(value.clone());
-                }
-            }
-            Ok(values)
-        })
+    fn values(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        self.collect_entries()?
+            .iter()
+            .map(|(_, value)| self.decode(py, value))
+            .collect()
     }
 
-    fn items(&self) -> PyResult<Vec<(String, String)>> {
-        self.collect_entries()
+    fn items(&self, py: Python<'_>) -> PyResult<Vec<(String, Py<PyAny>)>> {
+        self.collect_entries()?
+            .into_iter()
+            .map(|(key, value)| Ok((key, self.decode(py, &value)?)))
+            .collect()
     }
 
     fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
