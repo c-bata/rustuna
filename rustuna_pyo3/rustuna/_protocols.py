@@ -116,6 +116,11 @@ class StorageProtocol(Protocol):
 
     This protocol defines the interface that storage backends must implement
     to persist optimization history.
+
+    Attribute values are exchanged as plain strings. A storage implemented in Python may
+    declare an ``attrs_format = "json"`` attribute; Rustuna then exchanges user and system
+    attribute values as JSON-serializable Python objects, and the attribute APIs of
+    studies and trials using the storage accept such values.
     """
 
     def create_new_study(

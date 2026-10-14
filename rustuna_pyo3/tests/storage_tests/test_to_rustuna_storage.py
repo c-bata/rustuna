@@ -8,12 +8,90 @@ from typing import TYPE_CHECKING
 
 import optuna
 import pytest
+from optuna.storages.journal import JournalFileBackend
 
 import rustuna
 from rustuna.converter import ToRustunaStorage
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
+
     from rustuna._rustuna import Distribution
+
+
+TYPED_ATTRS = {
+    "int": 1,
+    "float": 0.5,
+    "str": "123",
+    "none": None,
+    "bool": True,
+    "list": [1, "a", None],
+    "dict": {"nested": {"x": [0.1, 0.2]}},
+}
+
+
+@pytest.fixture(params=["inmemory", "rdb-sqlite3", "journal-file"])
+def optuna_storage(
+    request: pytest.FixtureRequest,
+) -> Generator[optuna.storages.BaseStorage, None, None]:
+    if request.param == "inmemory":
+        yield optuna.storages.InMemoryStorage()
+        return
+    if request.param == "rdb-sqlite3":
+        yield optuna.storages.RDBStorage("sqlite://")
+        return
+    with tempfile.TemporaryDirectory() as workdir:
+        yield optuna.storages.JournalStorage(
+            JournalFileBackend(f"{workdir}/test.journal")
+        )
+
+
+def test_user_attrs_written_by_rustuna_keep_types_in_optuna_storage(
+    optuna_storage: optuna.storages.BaseStorage,
+) -> None:
+    rustuna_study = rustuna.create_study(
+        storage=ToRustunaStorage(optuna_storage), study_name="rustuna"
+    )
+    rustuna_study.set_user_attrs(TYPED_ATTRS)
+    trial = rustuna_study.ask()
+    trial.set_user_attrs(TYPED_ATTRS)
+    rustuna_study.tell(trial.number, 1.0)
+    rustuna_study.add_trial(rustuna.create_trial(value=2.0, user_attrs=TYPED_ATTRS))
+    rustuna_study.enqueue_trial({}, user_attrs=TYPED_ATTRS)
+
+    optuna_study = optuna.load_study(study_name="rustuna", storage=optuna_storage)
+    assert optuna_study.user_attrs == TYPED_ATTRS
+    assert len(optuna_study.trials) == 3
+    for optuna_trial in optuna_study.trials:
+        assert optuna_trial.user_attrs == TYPED_ATTRS
+
+
+def test_user_attrs_written_by_optuna_keep_types_in_rustuna(
+    optuna_storage: optuna.storages.BaseStorage,
+) -> None:
+    optuna_study = optuna.create_study(storage=optuna_storage, study_name="optuna")
+    for key, value in TYPED_ATTRS.items():
+        optuna_study.set_user_attr(key, value)
+    optuna_trial = optuna_study.ask()
+    for key, value in TYPED_ATTRS.items():
+        optuna_trial.set_user_attr(key, value)
+    optuna_study.tell(optuna_trial, 1.0)
+    optuna_study.add_trial(optuna.trial.create_trial(value=2.0, user_attrs=TYPED_ATTRS))
+
+    storage = ToRustunaStorage(optuna_storage)
+    rustuna_study = rustuna.load_study(study_name="optuna", storage=storage)
+    assert rustuna_study.user_attrs == TYPED_ATTRS
+    for key, value in TYPED_ATTRS.items():
+        assert rustuna_study.get_user_attr(key) == value
+    trials = rustuna_study.get_trials()
+    assert len(trials) == 2
+    for trial in trials:
+        assert trial.user_attrs == TYPED_ATTRS
+        assert trial.get_user_attr("dict") == TYPED_ATTRS["dict"]
+
+    # The storage protocol exchanges JSON-serializable values.
+    assert storage.attrs_format == "json"
+    assert storage.get_study_user_attr(rustuna_study._study_id, "str") == "123"
 
 
 def test_optimize_with_optuna_storage():

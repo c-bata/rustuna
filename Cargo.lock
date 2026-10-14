@@ -439,6 +439,8 @@ dependencies = [
  "js-sys",
  "rand",
  "rand_distr",
+ "serde",
+ "serde_json",
  "statrs",
 ]
 
