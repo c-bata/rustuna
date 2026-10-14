@@ -131,7 +131,7 @@ jobs:
           python -I -c 'import sys, sysconfig, rustuna; assert not sysconfig.get_config_var("Py_GIL_DISABLED") or not sys._is_gil_enabled(), "importing rustuna re-enabled the GIL"'
           python -I -c 'import tempfile, rustuna; workdir = tempfile.TemporaryDirectory(); rustuna.storages.SQLite3Storage(f"{workdir.name}/rustuna.db")'
       - name: Upload wheel
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wheel-${{ matrix.platform }}-${{ matrix.artifact_suffix }}
           path: dist/*.whl
@@ -189,7 +189,7 @@ jobs:
             /tmp/venv/bin/python -I -c "import tempfile, rustuna; workdir = tempfile.TemporaryDirectory(); rustuna.storages.SQLite3Storage(f\"{workdir.name}/rustuna.db\")"
           '
       - name: Upload wheel
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wheel-${{ matrix.platform }}-cp311-abi3
           path: dist/*.whl
@@ -269,7 +269,7 @@ jobs:
           # GIL-enabled runtime. No-op on GIL-enabled builds, so the abi3 and abi3t legs share it.
           "$PYTHON_PATH" -I -c 'import sys, sysconfig, tempfile, rustuna; assert not sysconfig.get_config_var("Py_GIL_DISABLED") or not sys._is_gil_enabled(), "importing rustuna re-enabled the GIL"; workdir = tempfile.TemporaryDirectory(); rustuna.storages.SQLite3Storage(f"{workdir.name}/rustuna.db")'
       - name: Upload wheel
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wheel-${{ matrix.platform }}-${{ matrix.artifact_suffix }}
           path: dist/*.whl
@@ -355,7 +355,7 @@ jobs:
           uv run --isolated --no-project --with dist/*.tar.gz \
             python -I -c 'import tempfile, rustuna; workdir = tempfile.TemporaryDirectory(); rustuna.storages.SQLite3Storage(f"{workdir.name}/rustuna.db")'
       - name: Upload source distribution
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sdist
           path: dist/*.tar.gz
@@ -409,7 +409,7 @@ jobs:
           uvx --from "abi3audit==$ABI3AUDIT_VERSION"
           abi3audit --strict --verbose dist/*-cp311-abi3-*.whl
       - name: Upload verified distributions
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: python-distributions
           path: dist/*
