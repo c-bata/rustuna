@@ -31,6 +31,7 @@ use crate::storage::cached::PyCachedStorage;
 use crate::storage::in_memory::PyInMemoryStorage;
 use crate::storage::journal::PyJournalFileStorage;
 use crate::storage::sqlite3::PySQLite3Storage;
+use crate::storage::to_python::ToPythonStorage;
 use crate::storage::to_rust::ToRustStorage;
 use crate::trial::{PyPersistedTrial, PyTrial, PyTrialState};
 use crate::trial_queue::directory::PyDirectoryTrialQueue;
@@ -193,7 +194,11 @@ fn resolve_storage_pyobj(
 ) -> PyResult<(SharedStorage, Py<PyAny>)> {
     let storage_pyobj = storage.clone_ref(py);
     let storage_ref = storage.bind(py);
-    if let Ok(py_inmemory_storage) = storage_ref.extract::<PyInMemoryStorage>() {
+    // Python sampler callbacks receive this view of the native storage. Reuse its
+    // Arc rather than wrapping it in ToRustStorage and round-tripping every trial.
+    if let Ok(py_storage) = storage_ref.extract::<PyRef<'_, ToPythonStorage>>() {
+        Ok((py_storage.storage(), storage_pyobj))
+    } else if let Ok(py_inmemory_storage) = storage_ref.extract::<PyInMemoryStorage>() {
         Ok((py_inmemory_storage.storage(), storage_pyobj))
     } else if let Ok(py_cached_storage) = storage_ref.extract::<PyCachedStorage>() {
         Ok((py_cached_storage.storage(), storage_pyobj))
