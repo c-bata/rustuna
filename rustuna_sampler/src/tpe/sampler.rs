@@ -571,6 +571,20 @@ impl TpeSampler {
             )
         })?;
         let trials = guard.get_trials(ctx.study_id)?;
+        // Startup uses random sampling without validating observations. Stop
+        // counting at the threshold to avoid a second full scan of the history.
+        let n_usable = trials
+            .iter()
+            .flatten()
+            .filter(|trial| match &trial.state_values {
+                TrialStateValues::Complete(values) => !values.iter().any(|x| x.is_nan()),
+                _ => false,
+            })
+            .take(self.n_startup_trials)
+            .count();
+        if n_usable < self.n_startup_trials {
+            return Ok(None);
+        }
         // Locks always follow storage -> observations. Model construction and
         // cached snapshot reads hold neither lock while calling storage.
         let mut cache = self.observations_cache.write().map_err(|e| {
@@ -1460,29 +1474,39 @@ mod tests {
             .contains_key(&key(200 + OBSERVATIONS_CACHE_CAP as u32 + 4)));
     }
 
-    /// A malformed constraint attr makes the snapshot fail, which surfaces
-    /// from `before_trial` and thus from `Study::ask`.
     #[test]
-    fn test_malformed_constraint_fails_ask() {
+    fn malformed_observations_are_validated_only_after_startup() {
         use rustuna_core::attr::{AttrKey, Attrs};
 
-        let storage = InMemoryStorage::new();
-        let sampler = TpeBuilder::new().n_startup_trials(1).seed(0).build();
-        let study = create_study(
-            "bad-constraints",
-            storage,
-            sampler,
-            vec![Direction::Minimize],
-        )
-        .unwrap();
-        let mut trial = rustuna_core::trial::PersistedTrial::new(0, study.id, 0);
-        trial.state_values = TrialStateValues::Complete(vec![0.0]);
-        trial.attrs = Attrs::from([(
-            AttrKey::System("constraints:c0".into()),
-            "broken".to_string(),
-        )]);
-        study.add_trial(trial).unwrap();
-        assert!(study.ask().is_err());
+        for values in [vec![0.0], vec![0.0, 1.0]] {
+            let study = create_study(
+                "startup-validation",
+                InMemoryStorage::new(),
+                TpeBuilder::new().n_startup_trials(2).build(),
+                vec![Direction::Minimize],
+            )
+            .unwrap();
+            let mut trial = PersistedTrial::new(0, study.id, 0);
+            if values.len() == 1 {
+                trial.attrs =
+                    Attrs::from([(AttrKey::System("constraints:c".into()), "broken".into())]);
+            }
+            // Bypass add_trial's objective-count and NaN validation for malformed data.
+            for values in [values, vec![f64::NAN]] {
+                trial.state_values = TrialStateValues::Complete(values);
+                study
+                    .storage
+                    .write()
+                    .unwrap()
+                    .create_new_trial_from_template(study.id, &trial)
+                    .unwrap();
+            }
+            assert!(study.ask().is_ok()); // NaN must not count toward startup.
+            trial.state_values = TrialStateValues::Complete(vec![1.0]);
+            trial.attrs.clear();
+            study.add_trial(trial).unwrap();
+            assert!(study.ask().is_err()); // Two non-NaN completed trials.
+        }
     }
 
     #[test]
@@ -1668,64 +1692,47 @@ mod tests {
     fn failed_study_updates_do_not_retain_partial_histories() {
         use rustuna_core::attr::{AttrKey, Attrs};
 
-        let storage: Arc<RwLock<dyn Storage>> = Arc::new(RwLock::new(InMemoryStorage::new()));
-        let sampler = TpeBuilder::new().n_startup_trials(1).build();
-        for index in 0..OBSERVATIONS_CACHE_CAP + 5 {
-            let study_id = {
-                let mut guard = storage.write().unwrap();
-                let study_id = guard
-                    .create_new_study(&format!("malformed-{index}"), vec![Direction::Minimize])
-                    .unwrap()
-                    .id;
-                let trial_id = guard.create_new_trial(study_id).unwrap().id;
-                guard
-                    .set_trial_state_values(trial_id, TrialStateValues::Complete(vec![1.0]))
-                    .unwrap();
-                study_id
-            };
+        for prime_cache in [false, true] {
+            let mut storage = InMemoryStorage::new();
+            let study_id = storage
+                .create_new_study("malformed", vec![Direction::Minimize])
+                .unwrap()
+                .id;
+            let mut trial = PersistedTrial::new(0, study_id, 0);
+            trial.state_values = TrialStateValues::Complete(vec![1.0]);
+            storage
+                .create_new_trial_from_template(study_id, &trial)
+                .unwrap();
+            let storage: Arc<RwLock<dyn Storage>> = Arc::new(RwLock::new(storage));
+            let sampler = TpeBuilder::new().n_startup_trials(1).build();
             let ctx = Context {
                 study_id,
                 trial_id: u32::MAX,
                 trial_number: 2,
                 directions: vec![Direction::Minimize],
             };
-            // Exercise both an existing history and a first-time cache insertion.
-            let old_snapshot = if index % 2 == 0 {
-                sampler.snapshot_from_storage(&ctx, &storage).unwrap()
-            } else {
-                None
-            };
-            {
-                let mut guard = storage.write().unwrap();
-                let trial_id = guard.create_new_trial(study_id).unwrap().id;
-                guard
-                    .set_trial_attrs(
-                        trial_id,
-                        Attrs::from([(AttrKey::System("constraints:c".into()), "broken".into())]),
-                        false,
-                    )
-                    .unwrap();
-                guard
-                    .set_trial_state_values(trial_id, TrialStateValues::Complete(vec![0.0]))
-                    .unwrap();
+            if prime_cache {
+                sampler.snapshot_from_storage(&ctx, &storage).unwrap();
             }
-            // Retrying must still report the malformed constraint.
+            trial.attrs = Attrs::from([(AttrKey::System("constraints:c".into()), "broken".into())]);
+            storage
+                .write()
+                .unwrap()
+                .create_new_trial_from_template(study_id, &trial)
+                .unwrap();
             for _ in 0..2 {
                 assert!(sampler.before_trial(&ctx, storage.clone()).is_err());
-            }
-            if let Some(snapshot) = old_snapshot {
-                assert_eq!(snapshot.values, [1.0]);
+                let cache = sampler.observations_cache.read().unwrap();
+                assert!(cache.studies.is_empty());
+                assert!(cache.per_trial.is_empty());
             }
         }
-        let cache = sampler.observations_cache.read().unwrap();
-        assert!(cache.studies.is_empty());
-        assert!(cache.per_trial.is_empty());
     }
 
     #[test]
     fn retained_study_histories_have_a_bounded_capacity() {
         let storage: Arc<RwLock<dyn Storage>> = Arc::new(RwLock::new(InMemoryStorage::new()));
-        let sampler = TpeBuilder::new().n_startup_trials(1).build();
+        let sampler = TpeBuilder::new().n_startup_trials(0).build();
         for index in 0..OBSERVATIONS_CACHE_CAP + 5 {
             let study_id = storage
                 .write()
