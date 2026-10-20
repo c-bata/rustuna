@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use pyo3::class::basic::CompareOp;
 use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyTypeError};
@@ -13,16 +13,15 @@ use crate::exception::err_to_exceptions;
 
 static JSON_DUMPS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static JSON_LOADS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static CACHED_JSON_LOADS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 // `get_trials()` recreates `PersistedTrial` objects on every call, and callers typically read the
 // same attributes of all trials repeatedly. Decoded JSON values are therefore cached by their text.
 // The cache key is the stored text itself, so no invalidation is needed when an attribute is
 // overwritten. Like Optuna's `get_trials(deepcopy=False)`, decoded objects are shared and must not
-// be mutated by callers.
+// be mutated by callers. Large values bypass the cache to avoid retaining oversized keys.
 const DECODE_CACHE_CAPACITY: usize = 1 << 16;
 const DECODE_CACHE_MAX_TEXT_LEN: usize = 8 * 1024;
-static DECODE_CACHE: LazyLock<Mutex<HashMap<Box<str>, Py<PyAny>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn json_function<'py>(
     py: Python<'py>,
@@ -31,6 +30,18 @@ fn json_function<'py>(
 ) -> PyResult<&'py Bound<'py, PyAny>> {
     let function = cell.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
         Ok(py.import("json")?.getattr(name)?.unbind())
+    })?;
+    Ok(function.bind(py))
+}
+
+fn cached_json_loads_function<'py>(py: Python<'py>) -> PyResult<&'py Bound<'py, PyAny>> {
+    let function = CACHED_JSON_LOADS.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+        let loads = json_function(py, &JSON_LOADS, "loads")?.clone().unbind();
+        let decorator = py
+            .import("functools")?
+            .getattr("lru_cache")?
+            .call1((DECODE_CACHE_CAPACITY,))?;
+        Ok(decorator.call1((loads,))?.unbind())
     })?;
     Ok(function.bind(py))
 }
@@ -45,31 +56,12 @@ pub fn json_dumps(value: &Bound<'_, PyAny>) -> PyResult<String> {
 
 /// Deserializes a JSON text with `json.loads`, using the decode cache.
 pub fn json_loads(py: Python<'_>, text: &str) -> PyResult<Py<PyAny>> {
-    let cacheable = text.len() <= DECODE_CACHE_MAX_TEXT_LEN;
-    if cacheable {
-        let cache = DECODE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(value) = cache.get(text) {
-            return Ok(value.clone_ref(py));
-        }
-    }
-    let value = json_function(py, &JSON_LOADS, "loads")?
-        .call1((text,))?
-        .unbind();
-    if cacheable {
-        let evicted = {
-            let mut cache = DECODE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-            let evicted = if cache.len() >= DECODE_CACHE_CAPACITY {
-                std::mem::take(&mut *cache)
-            } else {
-                HashMap::new()
-            };
-            cache.insert(text.into(), value.clone_ref(py));
-            evicted
-        };
-        // Drop the evicted values after releasing the lock.
-        drop(evicted);
-    }
-    Ok(value)
+    let loads = if text.len() <= DECODE_CACHE_MAX_TEXT_LEN {
+        cached_json_loads_function(py)?
+    } else {
+        json_function(py, &JSON_LOADS, "loads")?
+    };
+    loads.call1((text,)).map(|value| value.unbind())
 }
 
 /// Encodes a Python attribute value into the JSON text stored in a storage.
