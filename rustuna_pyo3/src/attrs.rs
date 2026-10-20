@@ -9,6 +9,7 @@ use pyo3::types::{PyDict, PyIterator, PyList};
 use rustuna_core::attr::{AttrKey, Attrs, CategoryLabel};
 use rustuna_core::storage::Storage;
 
+use crate::decode_cache::DecodeCache;
 use crate::exception::err_to_exceptions;
 
 static JSON_DUMPS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -21,8 +22,8 @@ static JSON_LOADS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 // be mutated by callers.
 const DECODE_CACHE_CAPACITY: usize = 1 << 16;
 const DECODE_CACHE_MAX_TEXT_LEN: usize = 8 * 1024;
-static DECODE_CACHE: LazyLock<Mutex<HashMap<Box<str>, Py<PyAny>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static DECODE_CACHE: LazyLock<Mutex<DecodeCache<Py<PyAny>>>> =
+    LazyLock::new(|| Mutex::new(DecodeCache::new(DECODE_CACHE_CAPACITY)));
 
 fn json_function<'py>(
     py: Python<'py>,
@@ -47,7 +48,7 @@ pub fn json_dumps(value: &Bound<'_, PyAny>) -> PyResult<String> {
 pub fn json_loads(py: Python<'_>, text: &str) -> PyResult<Py<PyAny>> {
     let cacheable = text.len() <= DECODE_CACHE_MAX_TEXT_LEN;
     if cacheable {
-        let cache = DECODE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = DECODE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(value) = cache.get(text) {
             return Ok(value.clone_ref(py));
         }
@@ -58,15 +59,9 @@ pub fn json_loads(py: Python<'_>, text: &str) -> PyResult<Py<PyAny>> {
     if cacheable {
         let evicted = {
             let mut cache = DECODE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-            let evicted = if cache.len() >= DECODE_CACHE_CAPACITY {
-                std::mem::take(&mut *cache)
-            } else {
-                HashMap::new()
-            };
-            cache.insert(text.into(), value.clone_ref(py));
-            evicted
+            cache.insert(text, value.clone_ref(py))
         };
-        // Drop the evicted values after releasing the lock.
+        // Drop rejected/replaced/evicted values after releasing the lock.
         drop(evicted);
     }
     Ok(value)
