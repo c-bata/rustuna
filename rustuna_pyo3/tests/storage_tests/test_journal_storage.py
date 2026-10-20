@@ -88,6 +88,32 @@ def test_create_new_trial_from_template_optuna_compatibility() -> None:
         assert trials[0].state == optuna.trial.TrialState.WAITING
 
 
+def test_template_trial_params_are_optuna_compatible() -> None:
+    with tempfile.TemporaryDirectory() as workdir:
+        file_path = f"{workdir}/rustuna.journal"
+        rustuna_storage = rustuna.storages.JournalFileStorage(file_path)
+        rustuna_study = rustuna.create_study(
+            storage=rustuna_storage, study_name="example"
+        )
+        rustuna_study.add_trial(
+            rustuna.trial.create_trial(
+                params={"x": 1.5, "n": 3},
+                distributions={
+                    "x": rustuna.distributions.FloatDistribution(0.0, 10.0),
+                    "n": rustuna.distributions.IntDistribution(0, 10),
+                },
+                value=1.0,
+            )
+        )
+
+        optuna_storage = JournalStorage(JournalFileBackend(file_path))
+        study_id = optuna_storage.get_all_studies()[0]._study_id
+        trials = optuna_storage.get_all_trials(study_id, deepcopy=False)
+        assert len(trials) == 1
+        assert trials[0].params == {"x": 1.5, "n": 3}
+        assert isinstance(trials[0].params["n"], int)
+
+
 def test_journal_file_storage_can_apply_discard() -> None:
     with tempfile.TemporaryDirectory() as workdir:
         file_path = f"{workdir}/discarded.journal"

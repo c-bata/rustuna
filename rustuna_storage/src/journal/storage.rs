@@ -238,7 +238,8 @@ impl Storage for JournalStorage {
                     format!("Template trial has no internal param for '{param_name}'"),
                 )
             })?;
-            params.insert(param_name.clone(), param_value.to_string());
+            // Internal representations are written as JSON numbers, as Optuna does.
+            params.insert(param_name.clone(), value_to_json(*param_value));
             let labels = self.replay.labels_for_param(study_id, param_name);
             let dist_json = distribution_to_json(distribution, labels.as_deref())?;
             distributions.insert(param_name.clone(), dist_json);
