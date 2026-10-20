@@ -80,7 +80,7 @@ def to_persisted_trial(
         params=trial.params,
         distributions=distributions,
         intermediate_values=trial.intermediate_values,
-        user_attrs=to_rustuna_attrs(trial.user_attrs),
+        user_attrs=dict(trial.user_attrs),
         system_attrs=rustuna_system_attrs,
         datetime_start=trial.datetime_start,
         datetime_complete=trial.datetime_complete,

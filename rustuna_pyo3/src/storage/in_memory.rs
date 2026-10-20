@@ -2,6 +2,7 @@ use std::sync::{Arc, RwLock};
 
 use pyo3::prelude::*;
 
+use rustuna_core::attr::AttrFormat;
 use rustuna_core::storage::{InMemoryStorage, InMemoryStorageOptions, Storage};
 
 use crate::distribution::PyDistribution;
@@ -17,8 +18,12 @@ pub struct PyInMemoryStorage {
 }
 
 impl Default for PyInMemoryStorage {
+    /// The default storage of the Python API, which uses Optuna-compatible attributes.
     fn default() -> Self {
-        Self::new(InMemoryStorageOptions::default())
+        Self::new(InMemoryStorageOptions {
+            attr_format: AttrFormat::Json,
+            ..InMemoryStorageOptions::default()
+        })
     }
 }
 
@@ -42,7 +47,7 @@ impl PyInMemoryStorage {
     fn py_new(apply_discard: bool) -> Self {
         PyInMemoryStorage::new(InMemoryStorageOptions {
             apply_discard,
-            ..Default::default()
+            attr_format: AttrFormat::Json,
         })
     }
 
@@ -155,7 +160,12 @@ impl PyInMemoryStorage {
         self.binding.get_trial_number_from_id(py, trial_id)
     }
 
-    fn get_study_user_attr(&self, py: Python<'_>, study_id: u32, key: String) -> PyResult<String> {
+    fn get_study_user_attr(
+        &self,
+        py: Python<'_>,
+        study_id: u32,
+        key: String,
+    ) -> PyResult<Py<PyAny>> {
         self.binding.get_study_user_attr(py, study_id, key)
     }
 
@@ -164,7 +174,7 @@ impl PyInMemoryStorage {
         py: Python<'_>,
         study_id: u32,
         key: String,
-    ) -> PyResult<String> {
+    ) -> PyResult<Py<PyAny>> {
         self.binding.get_study_system_attr(py, study_id, key)
     }
 
