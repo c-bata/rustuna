@@ -133,7 +133,7 @@ class FrozenTrialLike(FrozenTrial):
 
     @property
     def _trial_id(self) -> int:
-        return self._persisted_trial._trial_id
+        return self.__trial_id
 
     @_trial_id.setter
     def _trial_id(self, value: int) -> None:
