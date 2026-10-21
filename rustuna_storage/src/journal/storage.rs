@@ -89,20 +89,21 @@ impl JournalStorage {
         self.backend.append_logs(&[log])
     }
 
-    /// Writes user or system attributes of a study or a trial.
+    /// Builds the logs that write user or system attributes of a study or a trial.
     ///
     /// `id_key` is `"study_id"` or `"trial_id"`, and `field` is `"user_attr"` or
-    /// `"system_attr"`.
-    fn write_attrs(
-        &mut self,
+    /// `"system_attr"`. Callers append the logs at once, so that no attribute is written when
+    /// another one is invalid.
+    fn attrs_to_logs(
+        &self,
         op_code: JournalOperation,
         id_key: &str,
         id: u32,
         field: &str,
         attrs: HashMap<String, String>,
-    ) -> Result<()> {
+    ) -> Result<Vec<JournalLog>> {
         if attrs.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         match self.replay.attr_format {
             AttrFormat::Plain => {
@@ -117,11 +118,15 @@ impl JournalStorage {
                     to_raw(&HashMap::from([("rustuna", Value::Null)]))?,
                 );
                 fields.insert(format!("{field}_str"), to_raw(&attrs)?);
-                self.write_log(op_code, fields)
+                Ok(vec![JournalLog {
+                    op_code: op_code as i32,
+                    worker_id: self.worker_id(),
+                    fields,
+                }])
             }
             AttrFormat::Json => {
                 // Optuna's schema: one log per key because Optuna asserts
-                // `len(log[field]) == 1`. All logs are appended at once.
+                // `len(log[field]) == 1`.
                 let worker_id = self.worker_id();
                 let mut logs = Vec::with_capacity(attrs.len());
                 for (key, value) in attrs {
@@ -137,7 +142,7 @@ impl JournalStorage {
                         fields,
                     });
                 }
-                self.backend.append_logs(&logs)
+                Ok(logs)
             }
         }
     }
@@ -688,7 +693,7 @@ impl Storage for JournalStorage {
             }
         }
 
-        // User and system attributes are written according to `attr_format`; see `write_attrs`.
+        // User and system attributes are written according to `attr_format`; see `attrs_to_logs`.
         let mut user_attrs = HashMap::new();
         let mut system_attrs = HashMap::new();
         for (key, value) in attrs {
@@ -701,20 +706,23 @@ impl Storage for JournalStorage {
                 }
             }
         }
-        self.write_attrs(
+        let mut logs = self.attrs_to_logs(
             JournalOperation::SetStudyUserAttr,
             "study_id",
             study_id,
             "user_attr",
             user_attrs,
         )?;
-        self.write_attrs(
+        logs.extend(self.attrs_to_logs(
             JournalOperation::SetStudySystemAttr,
             "study_id",
             study_id,
             "system_attr",
             system_attrs,
-        )?;
+        )?);
+        if !logs.is_empty() {
+            self.backend.append_logs(&logs)?;
+        }
         self.sync_with_backend()?;
         Ok(())
     }
@@ -764,20 +772,23 @@ impl Storage for JournalStorage {
                 }
             }
         }
-        self.write_attrs(
+        let mut logs = self.attrs_to_logs(
             JournalOperation::SetTrialUserAttr,
             "trial_id",
             trial_id,
             "user_attr",
             user_attrs,
         )?;
-        self.write_attrs(
+        logs.extend(self.attrs_to_logs(
             JournalOperation::SetTrialSystemAttr,
             "trial_id",
             trial_id,
             "system_attr",
             system_attrs,
-        )?;
+        )?);
+        if !logs.is_empty() {
+            self.backend.append_logs(&logs)?;
+        }
         self.sync_with_backend()?;
         Ok(())
     }
@@ -2924,6 +2935,25 @@ mod tests {
             attrs.insert(AttrKey::User("key".into()), value.to_string());
             assert!(storage.set_study_attrs(study_id, attrs, false).is_err());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_attrs_write_no_logs() -> Result<()> {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let mut storage = new_storage_with_format(&logs, AttrFormat::Json)?;
+        let study_id = storage
+            .create_new_study("study", vec![Direction::Minimize])?
+            .id;
+        let trial_id = storage.create_new_trial(study_id)?.id;
+        let n_logs = logs.lock().unwrap().len();
+
+        let mut attrs = Attrs::new();
+        attrs.insert(AttrKey::User("valid".into()), "1".to_string());
+        attrs.insert(AttrKey::System("invalid".into()), "foo".to_string());
+        assert!(storage.set_trial_attrs(trial_id, attrs, false).is_err());
+        assert_eq!(logs.lock().unwrap().len(), n_logs);
+        assert_eq!(user_attr(storage.get_trial(trial_id)?, "valid"), None);
         Ok(())
     }
 
