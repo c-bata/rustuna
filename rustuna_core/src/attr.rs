@@ -35,15 +35,6 @@ impl AttrFormat {
             AttrFormat::Json => plain_to_json(&value),
         }
     }
-
-    /// Converts an attribute value from `self` to the `to` representation.
-    pub fn convert(self, value: &str, to: AttrFormat) -> String {
-        match (self, to) {
-            (AttrFormat::Plain, AttrFormat::Json) => plain_to_json(value),
-            (AttrFormat::Json, AttrFormat::Plain) => json_to_plain(value),
-            _ => value.to_string(),
-        }
-    }
 }
 
 /// Encodes a plain attribute value as a JSON string.
@@ -250,18 +241,5 @@ mod tests {
         for plain in ["", "abc", "123", "null", "\"quoted\"", "日本語"] {
             assert_eq!(json_to_plain(&plain_to_json(plain)), plain);
         }
-    }
-
-    #[test]
-    fn attr_format_convert() {
-        assert_eq!(AttrFormat::Plain.convert("abc", AttrFormat::Plain), "abc");
-        assert_eq!(
-            AttrFormat::Plain.convert("abc", AttrFormat::Json),
-            "\"abc\""
-        );
-        assert_eq!(
-            AttrFormat::Json.convert("\"abc\"", AttrFormat::Plain),
-            "abc"
-        );
     }
 }
