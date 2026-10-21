@@ -40,7 +40,10 @@ impl PyInMemoryStorage {
     #[new]
     #[pyo3(signature = (*, apply_discard = false))]
     fn py_new(apply_discard: bool) -> Self {
-        PyInMemoryStorage::new(InMemoryStorageOptions { apply_discard })
+        PyInMemoryStorage::new(InMemoryStorageOptions {
+            apply_discard,
+            ..Default::default()
+        })
     }
 
     fn create_new_study(

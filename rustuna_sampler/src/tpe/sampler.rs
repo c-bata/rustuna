@@ -1560,6 +1560,7 @@ mod tests {
         let mut storage =
             InMemoryStorage::new_with_option(rustuna_core::storage::InMemoryStorageOptions {
                 apply_discard: true,
+                ..Default::default()
             });
         let study_id = storage
             .create_new_study("history", vec![Direction::Minimize; 2])
