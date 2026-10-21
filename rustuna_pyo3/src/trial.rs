@@ -10,7 +10,6 @@ use rustuna_core::attr::{
 use rustuna_core::distribution::Distribution;
 use rustuna_core::storage::Storage;
 use rustuna_core::trial::{PersistedTrial, Trial, TrialState, TrialStateValues};
-use rustuna_core::ErrorKind;
 
 use crate::attrs::{
     decode_attr_value, encode_attr_value, pyobj_to_attrs, pyobj_to_attrs_with_kind, AttrKind,
@@ -747,52 +746,6 @@ impl PyPersistedTrial {
                     .and_then(|trial| trial.constraints())
                     .map_err(err_to_exceptions)
             }
-        }
-    }
-
-    #[pyo3(name = "get_user_attr", signature = (key, *, decoder = None, default = None))]
-    pub fn get_user_attr<'py>(
-        &self,
-        py: Python<'py>,
-        key: String,
-        decoder: Option<Py<PyAny>>,
-        default: Option<Py<PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
-        let result = match &self.source {
-            PyPersistedTrialSource::Owned(trial) => trial
-                .attrs
-                .get(&AttrKey::User(key.into()))
-                .cloned()
-                .ok_or(rustuna_core::Error::new(ErrorKind::AttrNotFound)),
-            PyPersistedTrialSource::StorageBacked {
-                storage, trial_id, ..
-            } => {
-                let guard = storage.read().map_err(|e| {
-                    PyRuntimeError::new_err(format!("Failed to acquire the storage guard: {e:?}"))
-                })?;
-                guard.get_cached_trial(*trial_id).and_then(|trial| {
-                    trial
-                        .attrs
-                        .get(&AttrKey::User(key.into()))
-                        .cloned()
-                        .ok_or(rustuna_core::Error::new(ErrorKind::AttrNotFound))
-                })
-            }
-        };
-        match result {
-            // `decoder` is applied to the decoded value. Values stored with `json.dumps` by the
-            // caller are decoded as strings, so `decoder=json.loads` keeps working.
-            Ok(value) => {
-                let value = decode_attr_value(py, &value)?;
-                match decoder {
-                    Some(decoder) => decoder.call1(py, (value,)),
-                    None => Ok(value),
-                }
-            }
-            Err(e) if matches!(e.kind, ErrorKind::AttrNotFound) => {
-                Ok(default.unwrap_or_else(|| py.None()))
-            }
-            Err(e) => Err(err_to_exceptions(e)),
         }
     }
 

@@ -611,12 +611,11 @@ impl PyStudy {
         Ok(())
     }
 
-    #[pyo3(name = "get_user_attr", signature = (key, *, decoder = None, default = None))]
+    #[pyo3(name = "get_user_attr", signature = (key, *, default = None))]
     pub fn get_user_attr<'py>(
         &self,
         py: Python<'py>,
         key: String,
-        decoder: Option<Py<PyAny>>,
         default: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let result = {
@@ -626,15 +625,7 @@ impl PyStudy {
             guard.get_study_attr(self.study.id, AttrKey::User(key.into()))
         };
         match result {
-            // `decoder` is applied to the decoded value. Values stored with `json.dumps` by the
-            // caller are decoded as strings, so `decoder=json.loads` keeps working.
-            Ok(value) => {
-                let value = decode_attr_value(py, &value)?;
-                match decoder {
-                    Some(decoder) => decoder.call1(py, (value,)),
-                    None => Ok(value),
-                }
-            }
+            Ok(value) => decode_attr_value(py, &value),
             Err(e) if matches!(e.kind, ErrorKind::AttrNotFound) => {
                 Ok(default.unwrap_or_else(|| py.None()))
             }

@@ -87,7 +87,7 @@ def test_user_attrs_written_by_optuna_keep_types_in_rustuna(
     assert len(trials) == 2
     for trial in trials:
         assert trial.user_attrs == TYPED_ATTRS
-        assert trial.get_user_attr("dict") == TYPED_ATTRS["dict"]
+        assert trial.user_attrs.get("dict") == TYPED_ATTRS["dict"]
 
     # The storage protocol exchanges JSON-serializable values.
     assert storage.get_study_user_attr(rustuna_study._study_id, "str") == "123"

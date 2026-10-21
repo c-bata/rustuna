@@ -296,36 +296,6 @@ class PersistedTrial:
     def datetime_start(self) -> datetime.datetime | None: ...
     @property
     def datetime_complete(self) -> datetime.datetime | None: ...
-    def get_user_attr(
-        self,
-        key: str,
-        *,
-        decoder: Callable[[Any], Any] | None = None,
-        default: Any = None,
-    ) -> Any:
-        """Get a single user attribute value by key.
-
-        ``PersistedTrial`` internally may hold a reference to the storage backend
-        rather than a copy of all attribute data.  Accessing ``trial.user_attrs``
-        therefore triggers a full attribute fetch from the storage.  This method
-        retrieves only the requested key, which is both faster and uses less
-        memory when you need just one attribute.
-
-        It also provides a decoder callable and a default value for missing
-        keys, simplifying a common migration pattern from Optuna.
-
-        Args:
-            key: The attribute key to look up.
-            decoder: An optional callable applied to the value (e.g. ``int``,
-                ``json.loads``). The value is decoded first, so values stored with
-                ``json.dumps`` can still be read with ``decoder=json.loads``.
-            default: Value to return when the key does not exist.
-                Defaults to None.
-
-        Returns:
-            The attribute value (transformed by *decoder* if provided), or
-            *default* if the key is not found.
-        """
 
 # Study
 ObjectiveFuncType = Callable[[Trial], float | tuple[float, ...]]
@@ -742,31 +712,19 @@ class Study:
             }
             ```
         """
-    def get_user_attr(
-        self,
-        key: str,
-        *,
-        decoder: Callable[[Any], Any] | None = None,
-        default: Any = None,
-    ) -> Any:
+    def get_user_attr(self, key: str, *, default: Any = None) -> Any:
         """Get a single user attribute value by key.
 
         This method fetches only the specified attribute from the storage backend,
         avoiding the overhead of loading all user attributes via ``study.user_attrs``.
-        It also provides a decoder callable and a default value for missing keys,
-        simplifying a common migration pattern from Optuna.
 
         Args:
             key: The attribute key to look up.
-            decoder: An optional callable applied to the value (e.g. ``int``,
-                ``json.loads``). The value is decoded first, so values stored with
-                ``json.dumps`` can still be read with ``decoder=json.loads``.
             default: Value to return when the key does not exist.
                 Defaults to None.
 
         Returns:
-            The attribute value (transformed by *decoder* if provided), or
-            *default* if the key is not found.
+            The attribute value, or *default* if the key is not found.
         """
     def get_trials(
         self,
