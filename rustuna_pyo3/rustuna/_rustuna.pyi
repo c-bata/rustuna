@@ -151,8 +151,7 @@ class Trial:
         """Set a user attribute to the trial.
 
         Note:
-            Values must be JSON serializable when the storage uses ``attrs_format="json"``
-            (default), and str with ``attrs_format="str"``.
+            Values must be JSON serializable, as in Optuna.
 
         Args:
             key: A key string of the attribute.
@@ -162,8 +161,7 @@ class Trial:
         """Set user attributes to the trial.
 
         Note:
-            Values must be JSON serializable when the storage uses ``attrs_format="json"``
-            (default), and str with ``attrs_format="str"``.
+            Values must be JSON serializable, as in Optuna.
 
         Args:
             attrs: A dictionary object.
@@ -267,7 +265,6 @@ class PersistedTrial:
         system_attrs: dict[str, Any] | None = None,
         datetime_start: datetime.datetime | None = None,
         datetime_complete: datetime.datetime | None = None,
-        attrs_format: Literal["json", "str"] = "str",
     ) -> None: ...
     @property
     def _trial_id(self) -> int: ...
@@ -320,9 +317,8 @@ class PersistedTrial:
         Args:
             key: The attribute key to look up.
             decoder: An optional callable applied to the value (e.g. ``int``,
-                ``json.loads``). With ``attrs_format="json"``, the value is decoded
-                first, so values stored with ``json.dumps`` can still be read with
-                ``decoder=json.loads``.
+                ``json.loads``). The value is decoded first, so values stored with
+                ``json.dumps`` can still be read with ``decoder=json.loads``.
             default: Value to return when the key does not exist.
                 Defaults to None.
 
@@ -702,8 +698,7 @@ class Study:
         """Set a user attribute to the study.
 
         Note:
-            Values must be JSON serializable when the storage uses ``attrs_format="json"``
-            (default), and str with ``attrs_format="str"``.
+            Values must be JSON serializable, as in Optuna.
 
         Args:
             key: A key string of the attribute.
@@ -728,8 +723,7 @@ class Study:
         """Set user attributes to the study.
 
         Note:
-            Values must be JSON serializable when the storage uses ``attrs_format="json"``
-            (default), and str with ``attrs_format="str"``.
+            Values must be JSON serializable, as in Optuna.
 
         Args:
             attrs: A dictionary object.
@@ -765,9 +759,8 @@ class Study:
         Args:
             key: The attribute key to look up.
             decoder: An optional callable applied to the value (e.g. ``int``,
-                ``json.loads``). With ``attrs_format="json"``, the value is decoded
-                first, so values stored with ``json.dumps`` can still be read with
-                ``decoder=json.loads``.
+                ``json.loads``). The value is decoded first, so values stored with
+                ``json.dumps`` can still be read with ``decoder=json.loads``.
             default: Value to return when the key does not exist.
                 Defaults to None.
 
@@ -828,8 +821,6 @@ class PersistedStudy:
         directions: Optimization directions.
         user_attrs: Dictionary of user attributes.
         system_attrs: Dictionary of system attributes.
-        attrs_format: ``"json"`` if the attribute values are JSON-serializable objects, or
-            ``"str"`` (default) if they are the plain strings stored by a storage.
     """
     def __init__(
         self,
@@ -838,7 +829,6 @@ class PersistedStudy:
         directions: list[StudyDirection],
         user_attrs: dict[str, Any] | None = None,
         system_attrs: dict[str, Any] | None = None,
-        attrs_format: Literal["json", "str"] = "str",
     ) -> None: ...
     @property
     def id(self) -> int: ...
@@ -857,22 +847,10 @@ class CachedStorage:
     """Wrap a Python CachedStorageBackend with Rustuna's in-memory cache.
 
     Args:
-        backend: The Python backend. It receives and returns attribute values as stored,
-            i.e. JSON texts with ``attrs_format="json"``.
-        attrs_format: Representation of user and system attribute values. With ``"json"``
-            (default), attributes accept any JSON-serializable value and are stored in
-            Optuna's schema, so Optuna and Rustuna can read each other's studies. With
-            ``"str"``, attributes are plain strings.
+        backend: The Python backend. Attribute values are exchanged as JSON-serializable
+            objects.
     """
-    def __init__(
-        self,
-        backend: CachedStorageBackend,
-        *,
-        attrs_format: Literal["json", "str"] = "json",
-    ) -> None: ...
-    @property
-    def attrs_format(self) -> Literal["json", "str"]:
-        """Representation of user and system attribute values."""
+    def __init__(self, backend: CachedStorageBackend) -> None: ...
     def create_new_study(
         self, study_name: str, directions: list[StudyDirection]
     ) -> PersistedStudy: ...
@@ -1007,19 +985,12 @@ class InMemoryStorage:
 
     Args:
         apply_discard: If True, apply discard_trials() and omit discarded trials from subsequent reads.
-        attrs_format: Representation of user and system attribute values. With ``"json"``
-            (default), attributes accept any JSON-serializable value and are stored in
-            Optuna's schema, so Optuna and Rustuna can read each other's studies. With
-            ``"str"``, attributes are plain strings.
     """
     def __init__(
         self,
         *,
         apply_discard: bool = False,
-        attrs_format: Literal["json", "str"] = "json",
     ) -> None: ...
-    @property
-    def attrs_format(self) -> Literal["json", "str"]: ...
     def create_new_study(
         self, study_name: str, directions: list[StudyDirection]
     ) -> PersistedStudy: ...
@@ -1086,21 +1057,13 @@ class JournalFileStorage:
     Args:
         file_path: Path to the journal log file.
         apply_discard: If True, apply discard operations when reading the storage. Journal logs are written regardless of this option.
-        attrs_format: Representation of user and system attribute values. With ``"json"``
-            (default), attributes accept any JSON-serializable value and are stored in
-            Optuna's schema, so Optuna and Rustuna can read each other's studies. With
-            ``"str"``, attributes are plain strings.
     """
     def __init__(
         self,
         file_path: str,
         *,
         apply_discard: bool = False,
-        attrs_format: Literal["json", "str"] = "json",
     ) -> None: ...
-    @property
-    def attrs_format(self) -> Literal["json", "str"]:
-        """Representation of user and system attribute values."""
     def create_new_study(
         self, study_name: str, directions: list[StudyDirection]
     ) -> PersistedStudy: ...
@@ -1174,10 +1137,6 @@ class SQLite3Storage:
             ``create_database``, and enabling this option on a database that lacks it raises an
             error instead of silently ignoring discards. Discards applied by another process are
             picked up on the next read, except when that process' clock lags behind.
-        attrs_format: Representation of user and system attribute values. With ``"json"``
-            (default), attributes accept any JSON-serializable value and are stored in
-            Optuna's schema, so Optuna and Rustuna can read each other's studies. With
-            ``"str"``, attributes are plain strings.
     """
     def __init__(
         self,
@@ -1185,11 +1144,7 @@ class SQLite3Storage:
         *,
         create_database: bool = True,
         apply_discard: bool = False,
-        attrs_format: Literal["json", "str"] = "json",
     ) -> None: ...
-    @property
-    def attrs_format(self) -> Literal["json", "str"]:
-        """Representation of user and system attribute values."""
     def create_new_study(
         self, study_name: str, directions: list[StudyDirection]
     ) -> PersistedStudy: ...

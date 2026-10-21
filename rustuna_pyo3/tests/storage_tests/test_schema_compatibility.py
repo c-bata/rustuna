@@ -3,9 +3,9 @@
 ## Attribute values
 
 Optuna stores arbitrary JSON values as attributes.  Rustuna's storages created from Python
-use ``attrs_format="json"`` by default and store the same JSON texts (``value_json`` in
-``RDBStorage`` and raw JSON values in ``JournalStorage``), so user and system attributes
-written by one library are read with the same types by the other.  Rustuna's own system
+store the same JSON texts (``value_json`` in ``RDBStorage`` and raw JSON values in
+``JournalStorage``), so user and system attributes written by one library are read with
+the same types by the other.  Rustuna's own system
 attributes (e.g. category labels) are stored as JSON strings.  Their meanings are
 library-specific, so a system attribute written by one library is generally not
 interpreted by the other.

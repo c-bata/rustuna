@@ -59,11 +59,9 @@ However, there are two important behavioral differences:
 
 Both Optuna and Rustuna allow users to store `user_attrs` and `system_attrs` on `Trial` and `Study` objects, making them usable as a simple key-value store for trial- or study-specific metadata.
 
-Like Optuna, Rustuna's Python API stores any JSON-serializable object as an attribute value by default (`attrs_format="json"` of the storages). Both user and system attributes are stored in Optuna's schema, so Optuna and Rustuna can read each other's attributes in journal files and SQLite3 databases. To keep `get_trials()` fast, decoded values are cached, so mutable values such as lists and dicts returned by `user_attrs` must not be modified in place.
+Like Optuna, Rustuna's Python API stores any JSON-serializable object as an attribute value. Both user and system attributes are stored in Optuna's schema, so Optuna and Rustuna can read each other's attributes in journal files and SQLite3 databases. To keep `get_trials()` fast, decoded values are cached, so mutable values such as lists and dicts returned by `user_attrs` must not be modified in place.
 
-If you pass `attrs_format="str"` to a storage, attribute values are restricted to strings instead, and you need to call `json.dumps()` explicitly when storing non-string objects (for example, `trial.set_user_attr("key", json.dumps([1, 2, 3]))`). This avoids JSON decoding entirely, but Optuna cannot read the attribute values written in journal files.
-
-Limitations: journal logs must be strict JSON, so `JournalFileStorage` cannot store `NaN` or `Infinity` in attributes with `attrs_format="json"`.
+Limitations: journal logs must be strict JSON, so `JournalFileStorage` cannot store `NaN` or `Infinity` in attributes.
 
 Separately, Rustuna also provides bulk insert APIs such as `trial.set_user_attrs({"key1": "...", "key2": "..."})`.
 

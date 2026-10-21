@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from typing import Literal
 
 import optuna
 import pytest
@@ -146,15 +145,10 @@ def test_journal_file_storage_can_apply_discard() -> None:
             analysis_storage.get_trial(first_persisted._trial_id)
 
 
-@pytest.mark.parametrize("attrs_format", ["json", "str"])
-def test_rustuna_journal_attrs_are_optuna_replayable(
-    attrs_format: Literal["json", "str"],
-) -> None:
+def test_rustuna_journal_attrs_are_optuna_replayable() -> None:
     with tempfile.TemporaryDirectory() as workdir:
         file_path = os.path.join(workdir, "attrs.journal")
-        rustuna_storage = rustuna.storages.JournalFileStorage(
-            file_path, attrs_format=attrs_format
-        )
+        rustuna_storage = rustuna.storages.JournalFileStorage(file_path)
         rustuna_study = rustuna.create_study(
             storage=rustuna_storage, study_name="journal-attrs"
         )
@@ -173,74 +167,34 @@ def test_rustuna_journal_attrs_are_optuna_replayable(
         with open(file_path) as f:
             logs = [json.loads(line) for line in f]
 
+        # Attributes are written in Optuna's schema.
         study_user_log = next(log for log in logs if log["op_code"] == 2)
         trial_user_log = next(log for log in logs if log["op_code"] == 8)
-        if attrs_format == "json":
-            # Optuna's schema.
-            assert study_user_log["user_attr"] == {"study_user": "study value"}
-            assert "user_attr_str" not in study_user_log
-            assert trial_user_log["user_attr"] == {"trial_user": "trial value"}
-            assert "user_attr_str" not in trial_user_log
-        else:
-            assert study_user_log["user_attr"] == {"rustuna": None}
-            assert study_user_log["user_attr_str"] == {"study_user": "study value"}
-            assert trial_user_log["user_attr"] == {"rustuna": None}
-            assert trial_user_log["user_attr_str"] == {"trial_user": "trial value"}
+        assert study_user_log["user_attr"] == {"study_user": "study value"}
+        assert "user_attr_str" not in study_user_log
+        assert trial_user_log["user_attr"] == {"trial_user": "trial value"}
+        assert "user_attr_str" not in trial_user_log
 
         study_system_log = next(log for log in logs if log["op_code"] == 3)
         trial_system_log = next(log for log in logs if log["op_code"] == 9)
-        if attrs_format == "json":
-            assert study_system_log["system_attr"] == {"study_system": "study value"}
-            assert "system_attr_str" not in study_system_log
-            assert trial_system_log["system_attr"] == {"trial_system": "trial value"}
-            assert "system_attr_str" not in trial_system_log
-        else:
-            assert study_system_log["system_attr"] == {"rustuna": None}
-            assert study_system_log["system_attr_str"] == {
-                "study_system": "study value"
-            }
-            assert trial_system_log["system_attr"] == {"rustuna": None}
-            assert trial_system_log["system_attr_str"] == {
-                "trial_system": "trial value"
-            }
+        assert study_system_log["system_attr"] == {"study_system": "study value"}
+        assert "system_attr_str" not in study_system_log
+        assert trial_system_log["system_attr"] == {"trial_system": "trial value"}
+        assert "system_attr_str" not in trial_system_log
 
         optuna_storage = JournalStorage(JournalFileBackend(file_path))
         optuna_study = optuna.load_study(
             storage=optuna_storage, study_name="journal-attrs"
         )
-        expected_study_user_attrs = (
-            {"study_user": "study value"}
-            if attrs_format == "json"
-            else {"rustuna": None}
-        )
-        expected_trial_user_attrs = (
-            {"trial_user": "trial value"}
-            if attrs_format == "json"
-            else {"rustuna": None}
-        )
-        expected_study_system_attrs = (
-            {"study_system": "study value"}
-            if attrs_format == "json"
-            else {"rustuna": None}
-        )
-        expected_trial_system_attrs = (
-            {"trial_system": "trial value"}
-            if attrs_format == "json"
-            else {"rustuna": None}
-        )
-        assert optuna_study.user_attrs == expected_study_user_attrs
-        assert (
-            optuna_storage.get_study_system_attrs(optuna_study._study_id)
-            == expected_study_system_attrs
-        )
-        assert optuna_study.trials[0].user_attrs == expected_trial_user_attrs
-        assert optuna_study.trials[0].system_attrs == expected_trial_system_attrs
+        assert optuna_study.user_attrs == {"study_user": "study value"}
+        assert optuna_storage.get_study_system_attrs(optuna_study._study_id) == {
+            "study_system": "study value"
+        }
+        assert optuna_study.trials[0].user_attrs == {"trial_user": "trial value"}
+        assert optuna_study.trials[0].system_attrs == {"trial_system": "trial value"}
 
 
-@pytest.mark.parametrize("attrs_format", ["json", "str"])
-def test_optuna_journal_user_attrs_are_readable(
-    attrs_format: Literal["json", "str"],
-) -> None:
+def test_optuna_journal_user_attrs_are_readable() -> None:
     with tempfile.TemporaryDirectory() as workdir:
         file_path = os.path.join(workdir, "attrs.journal")
         optuna_study = optuna.create_study(
@@ -259,22 +213,10 @@ def test_optuna_journal_user_attrs_are_readable(
         optuna_study.tell(optuna_trial, 2.0)
 
         rustuna_study = rustuna.load_study(
-            storage=rustuna.storages.JournalFileStorage(
-                file_path, attrs_format=attrs_format
-            ),
+            storage=rustuna.storages.JournalFileStorage(file_path),
             study_name="optuna-attrs",
         )
         trials = rustuna_study.get_trials()
-        if attrs_format == "json":
-            assert rustuna_study.user_attrs == {"tags": ["a", "b"], "name": "foo"}
-            assert trials[0].user_attrs == {"count": 3, "label": "foo"}
-            assert trials[1].user_attrs == {"stats": {"n_calls": 5}}
-        else:
-            # Strings are unquoted and other values are exposed as JSON texts.
-            # Optuna's journal writes compact JSON.
-            assert rustuna_study.user_attrs == {
-                "tags": '["a","b"]',
-                "name": "foo",
-            }
-            assert trials[0].user_attrs == {"count": "3", "label": "foo"}
-            assert trials[1].user_attrs == {"stats": '{"n_calls":5}'}
+        assert rustuna_study.user_attrs == {"tags": ["a", "b"], "name": "foo"}
+        assert trials[0].user_attrs == {"count": 3, "label": "foo"}
+        assert trials[1].user_attrs == {"stats": {"n_calls": 5}}

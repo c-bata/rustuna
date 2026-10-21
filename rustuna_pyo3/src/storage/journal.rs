@@ -3,11 +3,11 @@ use std::sync::{Arc, RwLock};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
+use rustuna_core::attr::AttrFormat;
 use rustuna_core::storage::Storage;
 use rustuna_storage::journal::file::JournalFileBackend;
 use rustuna_storage::journal::storage::{JournalStorage, JournalStorageOptions};
 
-use crate::attrs::parse_attr_format;
 use crate::distribution::PyDistribution;
 use crate::storage::binding::StorageBinding;
 use crate::study::{PyDirection, PyPersistedStudy};
@@ -29,9 +29,8 @@ impl PyJournalFileStorage {
 #[pymethods]
 impl PyJournalFileStorage {
     #[new]
-    #[pyo3(signature = (file_path, *, apply_discard = false, attrs_format = "json"))]
-    fn py_new(file_path: &str, apply_discard: bool, attrs_format: &str) -> PyResult<Self> {
-        let attr_format = parse_attr_format(attrs_format)?;
+    #[pyo3(signature = (file_path, *, apply_discard = false))]
+    fn py_new(file_path: &str, apply_discard: bool) -> PyResult<Self> {
         let backend = JournalFileBackend::new(file_path, None).map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to create journal file: {e:?}"))
         })?;
@@ -39,18 +38,12 @@ impl PyJournalFileStorage {
             Box::new(backend),
             JournalStorageOptions {
                 apply_discard,
-                attr_format,
+                attr_format: AttrFormat::Json,
             },
         )
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to create journal storage: {e:?}")))?;
         let binding = StorageBinding::new(Arc::new(RwLock::new(storage)));
         Ok(PyJournalFileStorage { binding })
-    }
-
-    /// Representation of attribute values: ``"json"`` or ``"str"``.
-    #[getter]
-    fn attrs_format(&self) -> PyResult<&'static str> {
-        self.binding.attrs_format_name()
     }
 
     fn create_new_study(

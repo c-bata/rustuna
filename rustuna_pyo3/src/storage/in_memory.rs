@@ -5,7 +5,6 @@ use pyo3::prelude::*;
 use rustuna_core::attr::AttrFormat;
 use rustuna_core::storage::{InMemoryStorage, InMemoryStorageOptions, Storage};
 
-use crate::attrs::parse_attr_format;
 use crate::distribution::PyDistribution;
 use crate::storage::binding::StorageBinding;
 use crate::study::{PyDirection, PyPersistedStudy};
@@ -44,18 +43,12 @@ impl PyInMemoryStorage {
 #[pymethods]
 impl PyInMemoryStorage {
     #[new]
-    #[pyo3(signature = (*, apply_discard = false, attrs_format = "json"))]
-    fn py_new(apply_discard: bool, attrs_format: &str) -> PyResult<Self> {
-        Ok(PyInMemoryStorage::new(InMemoryStorageOptions {
+    #[pyo3(signature = (*, apply_discard = false))]
+    fn py_new(apply_discard: bool) -> Self {
+        PyInMemoryStorage::new(InMemoryStorageOptions {
             apply_discard,
-            attr_format: parse_attr_format(attrs_format)?,
-        }))
-    }
-
-    /// Representation of attribute values: ``"json"`` or ``"str"``.
-    #[getter]
-    fn attrs_format(&self) -> PyResult<&'static str> {
-        self.binding.attrs_format_name()
+            attr_format: AttrFormat::Json,
+        })
     }
 
     fn create_new_study(

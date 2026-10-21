@@ -36,12 +36,6 @@ impl ToPythonStorage {
         Ok(ToPythonStorage { binding })
     }
 
-    /// Representation of attribute values: ``"json"`` or ``"str"``.
-    #[getter]
-    fn attrs_format(&self) -> PyResult<&'static str> {
-        self.binding.attrs_format_name()
-    }
-
     fn create_new_study(
         &self,
         py: Python<'_>,

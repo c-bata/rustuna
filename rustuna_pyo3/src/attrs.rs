@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
 use pyo3::class::basic::CompareOp;
-use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDict, PyIterator, PyList, PyString};
-use rustuna_core::attr::{AttrFormat, AttrKey, Attrs, CategoryLabel};
+use pyo3::types::{PyDict, PyIterator, PyList};
+use rustuna_core::attr::{AttrKey, Attrs, CategoryLabel};
 use rustuna_core::storage::Storage;
 
 use crate::exception::err_to_exceptions;
@@ -72,75 +72,30 @@ pub fn json_loads(py: Python<'_>, text: &str) -> PyResult<Py<PyAny>> {
     Ok(value)
 }
 
-/// Parses the `attrs_format` argument of the storage constructors.
-pub fn parse_attr_format(format: &str) -> PyResult<AttrFormat> {
-    match format {
-        "json" => Ok(AttrFormat::Json),
-        "str" => Ok(AttrFormat::Plain),
-        _ => Err(PyValueError::new_err(format!(
-            "attrs_format must be 'json' or 'str', but got {format:?}."
-        ))),
-    }
+/// Encodes a Python attribute value into the JSON text stored in a storage.
+///
+/// Storages created from Python store attribute values in Optuna's schema, so any
+/// JSON-serializable value is accepted.
+pub fn encode_attr_value(value: &Bound<'_, PyAny>) -> PyResult<String> {
+    json_dumps(value)
 }
 
-/// Returns the name of an attribute format used by the Python API.
-pub fn attr_format_name(format: AttrFormat) -> &'static str {
-    match format {
-        AttrFormat::Json => "json",
-        AttrFormat::Plain => "str",
-    }
-}
-
-/// Returns the attribute format of a storage.
-pub fn storage_attr_format(storage: &Arc<RwLock<dyn Storage>>) -> PyResult<AttrFormat> {
-    let guard = storage.read().map_err(|e| {
-        PyRuntimeError::new_err(format!("Failed to acquire the storage guard: {e:?}"))
-    })?;
-    Ok(guard.attr_format())
-}
-
-/// Encodes a Python attribute value into the string stored in a storage.
-pub fn encode_attr_value(value: &Bound<'_, PyAny>, format: AttrFormat) -> PyResult<String> {
-    match format {
-        AttrFormat::Plain => value.extract::<String>().map_err(|_| {
-            PyTypeError::new_err(format!(
-                "Attribute values must be str when the attribute format is 'str', but got {}.",
-                value
-                    .get_type()
-                    .name()
-                    .map(|n| n.to_string())
-                    .unwrap_or_default()
-            ))
-        }),
-        AttrFormat::Json => json_dumps(value),
-    }
-}
-
-/// Decodes a string stored in a storage into a Python attribute value.
-pub fn decode_attr_value(py: Python<'_>, text: &str, format: AttrFormat) -> PyResult<Py<PyAny>> {
-    match format {
-        AttrFormat::Plain => Ok(PyString::new(py, text).into_any().unbind()),
-        AttrFormat::Json => json_loads(py, text),
-    }
+/// Decodes a JSON text stored in a storage into a Python attribute value.
+pub fn decode_attr_value(py: Python<'_>, text: &str) -> PyResult<Py<PyAny>> {
+    json_loads(py, text)
 }
 
 /// Converts a mapping of Python attribute values into attributes.
-///
-/// `format` is the representation of the values to store; see [`encode_attr_value`].
 // TODO(c-bata): Consider removing the PyDict branch if there is no significant performance
 // difference. The Mapping protocol branch (else) can handle PyDict as well.
-pub fn pyobj_to_attrs_with_kind(
-    obj: &Bound<'_, PyAny>,
-    kind: AttrKind,
-    format: AttrFormat,
-) -> PyResult<Attrs> {
+pub fn pyobj_to_attrs_with_kind(obj: &Bound<'_, PyAny>, kind: AttrKind) -> PyResult<Attrs> {
     if obj.is_instance_of::<PyDict>() {
         // Fast path for PyDict: iterate directly without calling .items() method.
         let dict = obj.cast::<PyDict>()?;
         let mut attrs = Attrs::with_capacity(dict.len());
         for (key, value) in dict {
             let key = key.extract::<String>()?;
-            let value = encode_attr_value(&value, format)?;
+            let value = encode_attr_value(&value)?;
             attrs.insert(kind.to_key(&key), value);
         }
         Ok(attrs)
@@ -150,22 +105,19 @@ pub fn pyobj_to_attrs_with_kind(
         let items = items.extract::<Vec<(String, Bound<'_, PyAny>)>>()?;
         let mut attrs = Attrs::with_capacity(items.len());
         for (key, value) in items {
-            attrs.insert(kind.to_key(&key), encode_attr_value(&value, format)?);
+            attrs.insert(kind.to_key(&key), encode_attr_value(&value)?);
         }
         Ok(attrs)
     }
 }
 
 /// Converts the attributes of a Python object implementing the storage protocol.
-///
-/// `format` is the representation of the values to store; see [`encode_attr_value`].
 pub fn pyobj_to_attrs(
     user_attrs: &Bound<'_, PyAny>,
     system_attrs: &Bound<'_, PyAny>,
-    format: AttrFormat,
 ) -> PyResult<Attrs> {
-    let user_attrs = pyobj_to_attrs_with_kind(user_attrs, AttrKind::User, format)?;
-    let system_attrs = pyobj_to_attrs_with_kind(system_attrs, AttrKind::System, format)?;
+    let user_attrs = pyobj_to_attrs_with_kind(user_attrs, AttrKind::User)?;
+    let system_attrs = pyobj_to_attrs_with_kind(system_attrs, AttrKind::System)?;
     let cap = user_attrs.len() + system_attrs.len();
     let mut attrs = Attrs::with_capacity(cap);
     for (key, value) in user_attrs {
@@ -209,20 +161,15 @@ enum AttrsDictViewSource {
 
 /// Read-only mapping of the user or system attributes of a trial.
 ///
-/// Values are decoded according to `format` (see [`decode_attr_value`]).
+/// Values are decoded with [`decode_attr_value`].
 #[pyclass(name = "AttrsDictView")]
 pub struct AttrsDictView {
     source: AttrsDictViewSource,
     kind: AttrKind,
-    format: AttrFormat,
 }
 
 impl AttrsDictView {
-    pub fn from_trial(
-        trial: &rustuna_core::trial::PersistedTrial,
-        kind: AttrKind,
-        format: AttrFormat,
-    ) -> Self {
+    pub fn from_trial(trial: &rustuna_core::trial::PersistedTrial, kind: AttrKind) -> Self {
         let mut attrs = Attrs::new();
         for (key, value) in &trial.attrs {
             if kind.matches(key) {
@@ -232,25 +179,18 @@ impl AttrsDictView {
         AttrsDictView {
             source: AttrsDictViewSource::Owned(attrs),
             kind,
-            format,
         }
     }
 
-    pub fn from_storage(
-        storage: Arc<RwLock<dyn Storage>>,
-        trial_id: u32,
-        kind: AttrKind,
-        format: AttrFormat,
-    ) -> Self {
+    pub fn from_storage(storage: Arc<RwLock<dyn Storage>>, trial_id: u32, kind: AttrKind) -> Self {
         AttrsDictView {
             source: AttrsDictViewSource::StorageBacked { storage, trial_id },
             kind,
-            format,
         }
     }
 
     fn decode(&self, py: Python<'_>, text: &str) -> PyResult<Py<PyAny>> {
-        decode_attr_value(py, text, self.format)
+        decode_attr_value(py, text)
     }
 
     fn with_attrs<R>(&self, f: impl FnOnce(&Attrs) -> PyResult<R>) -> PyResult<R> {

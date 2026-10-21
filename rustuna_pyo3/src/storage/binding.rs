@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyList;
-use rustuna_core::attr::{AttrFormat, AttrKey, CategoryLabel};
+use rustuna_core::attr::{AttrKey, CategoryLabel};
 use rustuna_core::distribution::Distribution;
 use rustuna_core::storage::Storage;
 use rustuna_core::study::{Direction, PersistedStudy};
@@ -25,14 +25,6 @@ impl StorageBinding {
         Self { storage }
     }
 
-    pub(crate) fn attr_format(&self) -> PyResult<AttrFormat> {
-        crate::attrs::storage_attr_format(&self.storage)
-    }
-
-    pub(crate) fn attrs_format_name(&self) -> PyResult<&'static str> {
-        Ok(crate::attrs::attr_format_name(self.attr_format()?))
-    }
-
     pub(crate) fn create_new_study(
         &self,
         py: Python<'_>,
@@ -49,7 +41,7 @@ impl StorageBinding {
                 .map_err(err_to_exceptions)?;
             Ok(study.clone())
         })?;
-        Ok(PyPersistedStudy::from_persisted(study, self.attr_format()?))
+        Ok(study.into())
     }
 
     pub(crate) fn delete_study(&self, py: Python<'_>, study_id: u32) -> PyResult<()> {
@@ -67,9 +59,8 @@ impl StorageBinding {
         study_id: u32,
         template_trial: Option<&Bound<'_, PyPersistedTrial>>,
     ) -> PyResult<PyPersistedTrial> {
-        let format = self.attr_format()?;
         let template_trial = template_trial
-            .map(|template_trial| template_trial.borrow().to_persisted_trial(format))
+            .map(|template_trial| template_trial.borrow().with_trial(|t| Ok(t.clone())))
             .transpose()?;
 
         py.detach(|| -> PyResult<PyPersistedTrial> {
@@ -207,7 +198,6 @@ impl StorageBinding {
     }
 
     pub(crate) fn get_studies(&self, py: Python<'_>) -> PyResult<Vec<PyPersistedStudy>> {
-        let format = self.attr_format()?;
         py.detach(|| -> PyResult<Vec<PyPersistedStudy>> {
             let mut guard = self.storage.write().map_err(|e| {
                 PyRuntimeError::new_err(format!("Failed to acquire the storage guard: {e:?}"))
@@ -215,21 +205,17 @@ impl StorageBinding {
             let studies = guard.get_studies().map_err(|e| {
                 PyRuntimeError::new_err(format!("Failed to get studies: {:?}", e.kind))
             })?;
-            Ok(studies
-                .iter()
-                .map(|s| PyPersistedStudy::from_persisted(s.clone(), format))
-                .collect())
+            Ok(studies.iter().map(|s| s.clone().into()).collect())
         })
     }
 
     pub(crate) fn get_study(&self, py: Python<'_>, study_id: u32) -> PyResult<PyPersistedStudy> {
-        let format = self.attr_format()?;
         py.detach(|| -> PyResult<PyPersistedStudy> {
             let mut guard = self.storage.write().map_err(|e| {
                 PyRuntimeError::new_err(format!("Failed to acquire the storage guard: {e:?}"))
             })?;
             let study = guard.get_study(study_id).map_err(err_to_exceptions)?;
-            Ok(PyPersistedStudy::from_persisted(study.clone(), format))
+            Ok(study.clone().into())
         })
     }
 
@@ -276,7 +262,6 @@ impl StorageBinding {
     }
 
     pub(crate) fn get_trial(&self, py: Python<'_>, trial_id: u32) -> PyResult<PyPersistedTrial> {
-        let format = self.attr_format()?;
         py.detach(|| -> PyResult<PyPersistedTrial> {
             let mut guard = self.storage.write().map_err(|e| {
                 PyRuntimeError::new_err(format!("Failed to acquire the storage guard: {e:?}"))
@@ -290,7 +275,7 @@ impl StorageBinding {
                 .map_err(err_to_exceptions)?
                 .attrs
                 .clone();
-            Ok(PyPersistedTrial::new(trial, study_attrs, format))
+            Ok(PyPersistedTrial::new(trial, study_attrs))
         })
     }
 
@@ -327,7 +312,6 @@ impl StorageBinding {
         study_id: u32,
         key: String,
     ) -> PyResult<Py<PyAny>> {
-        let format = self.attr_format()?;
         let value = py.detach(|| {
             let mut guard = self.storage.write().map_err(|e| {
                 PyRuntimeError::new_err(format!("Failed to acquire the storage guard: {e:?}"))
@@ -336,7 +320,7 @@ impl StorageBinding {
                 .get_study_attr(study_id, AttrKey::User(key.into()))
                 .map_err(err_to_exceptions)
         })?;
-        decode_attr_value(py, &value, format)
+        decode_attr_value(py, &value)
     }
 
     pub(crate) fn get_study_system_attr(
@@ -345,7 +329,6 @@ impl StorageBinding {
         study_id: u32,
         key: String,
     ) -> PyResult<Py<PyAny>> {
-        let format = self.attr_format()?;
         let value = py.detach(|| {
             let mut guard = self.storage.write().map_err(|e| {
                 PyRuntimeError::new_err(format!("Failed to acquire the storage guard: {e:?}"))
@@ -354,7 +337,7 @@ impl StorageBinding {
                 .get_study_attr(study_id, AttrKey::System(key.into()))
                 .map_err(err_to_exceptions)
         })?;
-        decode_attr_value(py, &value, format)
+        decode_attr_value(py, &value)
     }
 
     pub(crate) fn get_trial_id_from_study_id_trial_number(
@@ -381,7 +364,7 @@ impl StorageBinding {
         attrs: Py<PyAny>,
     ) -> PyResult<()> {
         let attrs = attrs.bind(py);
-        let system_attrs = pyobj_to_attrs_with_kind(attrs, AttrKind::System, self.attr_format()?)?;
+        let system_attrs = pyobj_to_attrs_with_kind(attrs, AttrKind::System)?;
         py.detach(|| -> PyResult<()> {
             let mut guard = self.storage.write().map_err(|e| {
                 PyRuntimeError::new_err(format!("Failed to acquire the storage guard: {e:?}"))
@@ -400,7 +383,7 @@ impl StorageBinding {
         attrs: Py<PyAny>,
     ) -> PyResult<()> {
         let attrs = attrs.bind(py);
-        let user_attrs = pyobj_to_attrs_with_kind(attrs, AttrKind::User, self.attr_format()?)?;
+        let user_attrs = pyobj_to_attrs_with_kind(attrs, AttrKind::User)?;
         py.detach(|| -> PyResult<()> {
             let mut guard = self.storage.write().map_err(|e| {
                 PyRuntimeError::new_err(format!("Failed to acquire the storage guard: {e:?}"))
@@ -419,7 +402,7 @@ impl StorageBinding {
         attrs: Py<PyAny>,
     ) -> PyResult<()> {
         let attrs = attrs.bind(py);
-        let system_attrs = pyobj_to_attrs_with_kind(attrs, AttrKind::System, self.attr_format()?)?;
+        let system_attrs = pyobj_to_attrs_with_kind(attrs, AttrKind::System)?;
         py.detach(|| -> PyResult<()> {
             let mut guard = self.storage.write().map_err(|e| {
                 PyRuntimeError::new_err(format!("Failed to acquire the storage guard: {e:?}"))
@@ -438,7 +421,7 @@ impl StorageBinding {
         attrs: Py<PyAny>,
     ) -> PyResult<()> {
         let attrs = attrs.bind(py);
-        let user_attrs = pyobj_to_attrs_with_kind(attrs, AttrKind::User, self.attr_format()?)?;
+        let user_attrs = pyobj_to_attrs_with_kind(attrs, AttrKind::User)?;
         py.detach(|| -> PyResult<()> {
             let mut guard = self.storage.write().map_err(|e| {
                 PyRuntimeError::new_err(format!("Failed to acquire the storage guard: {e:?}"))

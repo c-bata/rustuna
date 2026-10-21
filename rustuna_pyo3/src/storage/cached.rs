@@ -12,7 +12,7 @@ use rustuna_core::trial::{PersistedTrial, TrialStateValues};
 use rustuna_core::{Error, ErrorKind};
 use rustuna_storage::cache::{CachedStorage, CachedStorageBackend, DiscardedTrialsDiff};
 
-use crate::attrs::parse_attr_format;
+use crate::attrs::{decode_attr_value, encode_attr_value};
 use crate::distribution::pyobject_to_category_label;
 use crate::distribution::PyDistribution;
 use crate::storage::binding::StorageBinding;
@@ -21,14 +21,17 @@ use crate::trial::{
     pyobject_to_persisted_trial_with_category_labels, PyPersistedTrial, PyTrialState,
 };
 
+/// Adapts a `CachedStorageBackend` implemented in Python.
+///
+/// Attribute values are stored as JSON texts and exchanged with the Python backend as
+/// JSON-serializable objects, like other storages implemented in Python.
 pub(crate) struct PyCachedStorageBackend {
     obj: Py<PyAny>,
-    attr_format: AttrFormat,
 }
 
 impl PyCachedStorageBackend {
-    pub(crate) fn new(obj: Py<PyAny>, attr_format: AttrFormat) -> Self {
-        Self { obj, attr_format }
+    pub(crate) fn new(obj: Py<PyAny>) -> Self {
+        Self { obj }
     }
 
     fn map_pyerr(err: PyErr) -> Error {
@@ -58,26 +61,19 @@ impl PyCachedStorageBackend {
     }
 
     fn py_trial(py: Python<'_>, trial: PersistedTrial) -> PyResult<Py<PyAny>> {
-        // The backend receives the values as stored, i.e. JSON texts in the JSON format.
-        Ok(Py::new(
-            py,
-            PyPersistedTrial::new(trial, Attrs::new(), AttrFormat::Plain),
-        )?
-        .into_any())
+        Ok(Py::new(py, PyPersistedTrial::new(trial, Attrs::new()))?.into_any())
     }
 
     fn parse_trial(trial: &Bound<'_, PyAny>) -> PyResult<PersistedTrial> {
         pyobject_to_persisted_trial_with_category_labels(
             trial,
             trial.getattr("study_id")?.extract()?,
-            AttrFormat::Plain,
         )
         .map(|(trial, _)| trial)
     }
 
     fn parse_trial_for_study(trial: &Bound<'_, PyAny>, study_id: u32) -> PyResult<PersistedTrial> {
-        pyobject_to_persisted_trial_with_category_labels(trial, study_id, AttrFormat::Plain)
-            .map(|(trial, _)| trial)
+        pyobject_to_persisted_trial_with_category_labels(trial, study_id).map(|(trial, _)| trial)
     }
 
     fn parse_trials_for_study(
@@ -134,8 +130,12 @@ impl PyCachedStorageBackend {
         let system_attrs = PyDict::new(py);
         for (key, value) in attrs {
             match key {
-                AttrKey::User(key) => user_attrs.set_item(key.as_str(), value)?,
-                AttrKey::System(key) => system_attrs.set_item(key.as_str(), value)?,
+                AttrKey::User(key) => {
+                    user_attrs.set_item(key.as_str(), decode_attr_value(py, value)?)?
+                }
+                AttrKey::System(key) => {
+                    system_attrs.set_item(key.as_str(), decode_attr_value(py, value)?)?
+                }
             }
         }
         if !user_attrs.is_empty() {
@@ -160,7 +160,7 @@ impl CachedStorageBackend for PyCachedStorageBackend {
             let study =
                 self.obj
                     .call_method1(py, "create_new_study", (study_name, py_directions))?;
-            pyobject_to_persisted_study(study.bind(py), AttrFormat::Plain)
+            pyobject_to_persisted_study(study.bind(py))
         })
         .map_err(Self::map_pyerr)
     }
@@ -213,7 +213,7 @@ impl CachedStorageBackend for PyCachedStorageBackend {
                     Some(labels)
                 } else {
                     let study = self.obj.call_method1(py, "get_study", (trial.study_id,))?;
-                    let study = pyobject_to_persisted_study(study.bind(py), AttrFormat::Plain)?;
+                    let study = pyobject_to_persisted_study(study.bind(py))?;
                     get_category_labels(&study.attrs, name, *cardinality)
                 }
             } else {
@@ -281,7 +281,7 @@ impl CachedStorageBackend for PyCachedStorageBackend {
             let studies = studies.bind(py).cast::<PyList>()?;
             studies
                 .iter()
-                .map(|study| pyobject_to_persisted_study(&study, AttrFormat::Plain))
+                .map(|study| pyobject_to_persisted_study(&study))
                 .collect::<PyResult<Vec<_>>>()
         })
         .map_err(Self::map_pyerr)
@@ -290,7 +290,7 @@ impl CachedStorageBackend for PyCachedStorageBackend {
     fn get_study(&mut self, study_id: u32) -> rustuna_core::Result<PersistedStudy> {
         Python::attach(|py| {
             let study = self.obj.call_method1(py, "get_study", (study_id,))?;
-            pyobject_to_persisted_study(study.bind(py), AttrFormat::Plain)
+            pyobject_to_persisted_study(study.bind(py))
         })
         .map_err(Self::map_pyerr)
     }
@@ -310,11 +310,11 @@ impl CachedStorageBackend for PyCachedStorageBackend {
                 AttrKey::System(key) => ("get_study_system_attr", "system_attrs", key.to_string()),
             };
             if let Ok(method) = self.obj.getattr(py, method_name) {
-                return method.bind(py).call1((study_id, key))?.extract();
+                return encode_attr_value(&method.bind(py).call1((study_id, key))?);
             }
             let study = self.obj.call_method1(py, "get_study", (study_id,))?;
             let study = study.bind(py);
-            study.getattr(attrs_name)?.get_item(key.as_str())?.extract()
+            encode_attr_value(&study.getattr(attrs_name)?.get_item(key.as_str())?)
         })
         .map_err(Self::map_pyerr)
     }
@@ -340,7 +340,7 @@ impl CachedStorageBackend for PyCachedStorageBackend {
     }
 
     fn attr_format(&self) -> AttrFormat {
-        self.attr_format
+        AttrFormat::Json
     }
 
     fn apply_discard(&self) -> bool {
@@ -424,9 +424,8 @@ pub struct PyCachedStorage {
 }
 
 impl PyCachedStorage {
-    pub(crate) fn new(backend: Py<PyAny>, attr_format: AttrFormat) -> Self {
-        let storage =
-            CachedStorage::new(Box::new(PyCachedStorageBackend::new(backend, attr_format)));
+    pub(crate) fn new(backend: Py<PyAny>) -> Self {
+        let storage = CachedStorage::new(Box::new(PyCachedStorageBackend::new(backend)));
         Self {
             binding: StorageBinding::new(Arc::new(RwLock::new(storage))),
         }
@@ -440,15 +439,8 @@ impl PyCachedStorage {
 #[pymethods]
 impl PyCachedStorage {
     #[new]
-    #[pyo3(signature = (backend, *, attrs_format = "json"))]
-    fn py_new(backend: Py<PyAny>, attrs_format: &str) -> PyResult<Self> {
-        Ok(Self::new(backend, parse_attr_format(attrs_format)?))
-    }
-
-    /// Representation of attribute values: ``"json"`` or ``"str"``.
-    #[getter]
-    fn attrs_format(&self) -> PyResult<&'static str> {
-        self.binding.attrs_format_name()
+    fn py_new(backend: Py<PyAny>) -> Self {
+        Self::new(backend)
     }
 
     fn create_new_study(

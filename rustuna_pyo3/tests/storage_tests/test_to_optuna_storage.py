@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 from datetime import datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import optuna
 import pytest
@@ -25,18 +25,12 @@ if TYPE_CHECKING:
     from optuna.storages import BaseStorage
 
 
-def _rustuna_storage(
-    backend: str, workdir: str, attrs_format: Literal["json", "str"]
-) -> rustuna.storages.StorageProtocol:
+def _rustuna_storage(backend: str, workdir: str) -> rustuna.storages.StorageProtocol:
     if backend == "sqlite3":
         return rustuna.storages.SQLite3Storage(
-            f"{workdir}/test.db",
-            create_database=True,
-            attrs_format=attrs_format,
+            f"{workdir}/test.db", create_database=True
         )
-    return rustuna.storages.JournalFileStorage(
-        f"{workdir}/test.journal", attrs_format=attrs_format
-    )
+    return rustuna.storages.JournalFileStorage(f"{workdir}/test.journal")
 
 
 def _optuna_storage(backend: str, workdir: str) -> BaseStorage:
@@ -45,28 +39,15 @@ def _optuna_storage(backend: str, workdir: str) -> BaseStorage:
     return JournalStorage(JournalFileBackend(f"{workdir}/test.journal"))
 
 
-@pytest.fixture(
-    params=[
-        ("sqlite3", "json"),
-        ("journal-file", "json"),
-        ("sqlite3", "str"),
-        ("journal-file", "str"),
-    ],
-    ids=["sqlite3-json", "journal-file-json", "sqlite3-str", "journal-file-str"],
-)
+@pytest.fixture(params=["sqlite3", "journal-file"])
 def storage(request: FixtureRequest) -> Generator[BaseStorage, None, None]:
-    backend, attrs_format = request.param
     with tempfile.TemporaryDirectory() as workdir:
-        yield ToOptunaStorage(_rustuna_storage(backend, workdir, attrs_format))
+        yield ToOptunaStorage(_rustuna_storage(request.param, workdir))
 
 
-def _is_json_journal(storage: BaseStorage) -> bool:
+def _is_journal(storage: BaseStorage) -> bool:
     assert isinstance(storage, ToOptunaStorage)
-    rustuna_storage = storage._storage
-    return (
-        isinstance(rustuna_storage, rustuna.storages.JournalFileStorage)
-        and rustuna_storage.attrs_format == "json"
-    )
+    return isinstance(storage._storage, rustuna.storages.JournalFileStorage)
 
 
 class TestRustunaStorage(StorageTestCase):
@@ -129,14 +110,14 @@ class TestRustunaStorage(StorageTestCase):
     def test_set_and_get_study_user_attrs_for_floats(
         self, storage: BaseStorage
     ) -> None:
-        if _is_json_journal(storage):
+        if _is_journal(storage):
             pytest.skip(
                 "Journal logs must be strict JSON, so NaN and Infinity are rejected."
             )
         super().test_set_and_get_study_user_attrs_for_floats(storage)
 
     def test_set_and_get_trial_user_attr_for_floats(self, storage: BaseStorage) -> None:
-        if _is_json_journal(storage):
+        if _is_journal(storage):
             pytest.skip(
                 "Journal logs must be strict JSON, so NaN and Infinity are rejected."
             )
@@ -145,7 +126,7 @@ class TestRustunaStorage(StorageTestCase):
     def test_set_and_get_study_system_attrs_for_floats(
         self, storage: BaseStorage
     ) -> None:
-        if _is_json_journal(storage):
+        if _is_journal(storage):
             pytest.skip(
                 "Journal logs must be strict JSON, so NaN and Infinity are rejected."
             )
@@ -154,7 +135,7 @@ class TestRustunaStorage(StorageTestCase):
     def test_set_and_get_trial_system_attr_for_floats(
         self, storage: BaseStorage
     ) -> None:
-        if _is_json_journal(storage):
+        if _is_journal(storage):
             pytest.skip(
                 "Journal logs must be strict JSON, so NaN and Infinity are rejected."
             )
@@ -180,9 +161,8 @@ class TestRustunaStorage(StorageTestCase):
 
 @pytest.mark.parametrize("backend", ["sqlite3", "journal-file"])
 def test_studies_written_through_rustuna_are_readable_by_optuna(backend: str) -> None:
-    """With ``attrs_format="json"``, Optuna reads the same user attributes directly."""
     with tempfile.TemporaryDirectory() as workdir:
-        rustuna_storage = _rustuna_storage(backend, workdir, "json")
+        rustuna_storage = _rustuna_storage(backend, workdir)
         expected_studies, expected_trials = _setup_studies(
             ToOptunaStorage(rustuna_storage), n_study=3, n_trial=5, seed=1
         )
@@ -213,7 +193,7 @@ def test_studies_written_by_optuna_are_readable_through_rustuna(backend: str) ->
             _optuna_storage(backend, workdir), n_study=3, n_trial=5, seed=2
         )
 
-        storage = ToOptunaStorage(_rustuna_storage(backend, workdir, "json"))
+        storage = ToOptunaStorage(_rustuna_storage(backend, workdir))
         studies = {s.study_name: s for s in storage.get_all_studies()}
         assert len(studies) == len(expected_studies)
         for study_id, expected_study in expected_studies.items():
@@ -230,7 +210,7 @@ def test_typed_user_attrs_are_shared_with_optuna_study() -> None:
     attrs = {"int": 1, "float": 0.5, "str": "123", "none": None, "list": [1, "a"]}
     with tempfile.TemporaryDirectory() as workdir:
         rustuna_study = rustuna.create_study(
-            storage=_rustuna_storage("journal-file", workdir, "json"), study_name="s"
+            storage=_rustuna_storage("journal-file", workdir), study_name="s"
         )
         rustuna_study.set_user_attrs(attrs)
         trial = rustuna_study.ask()

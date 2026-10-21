@@ -265,8 +265,7 @@ class StorageProtocol(Protocol):
             key: Attribute key.
 
         Returns:
-            The attribute value: a string, or a JSON-serializable object with
-            ``attrs_format = "json"``.
+            The attribute value.
         """
 
     def get_study_system_attr(self, study_id: int, key: str) -> Any:
@@ -277,8 +276,7 @@ class StorageProtocol(Protocol):
             key: Attribute key.
 
         Returns:
-            The attribute value: a string, or a JSON-serializable object with
-            ``attrs_format = "json"``.
+            The attribute value.
         """
 
     def get_trial_id_from_study_id_trial_number(
@@ -380,7 +378,10 @@ class StorageProtocol(Protocol):
 
 
 class CachedStorageBackend(Protocol):
-    """Protocol for Python backends used by Rustuna's ``CachedStorage``."""
+    """Protocol for Python backends used by Rustuna's ``CachedStorage``.
+
+    User and system attribute values are exchanged as JSON-serializable Python objects.
+    """
 
     def create_new_study(
         self, study_name: str, directions: list[StudyDirection]
@@ -428,22 +429,22 @@ class CachedStorageBackend(Protocol):
     ) -> int:
         """Return the number of persisted trials."""
 
-    def get_study_user_attr(self, study_id: int, key: str) -> str:
+    def get_study_user_attr(self, study_id: int, key: str) -> Any:
         """Return a study user attribute."""
 
-    def get_study_system_attr(self, study_id: int, key: str) -> str:
+    def get_study_system_attr(self, study_id: int, key: str) -> Any:
         """Return a study system attribute."""
 
-    def set_study_system_attrs(self, study_id: int, attrs: dict[str, str]) -> None:
+    def set_study_system_attrs(self, study_id: int, attrs: dict[str, Any]) -> None:
         """Persist study system attributes."""
 
-    def set_study_user_attrs(self, study_id: int, attrs: dict[str, str]) -> None:
+    def set_study_user_attrs(self, study_id: int, attrs: dict[str, Any]) -> None:
         """Persist study user attributes."""
 
-    def set_trial_system_attrs(self, trial_id: int, attrs: dict[str, str]) -> None:
+    def set_trial_system_attrs(self, trial_id: int, attrs: dict[str, Any]) -> None:
         """Persist trial system attributes."""
 
-    def set_trial_user_attrs(self, trial_id: int, attrs: dict[str, str]) -> None:
+    def set_trial_user_attrs(self, trial_id: int, attrs: dict[str, Any]) -> None:
         """Persist trial user attributes."""
 
     def set_trial_intermediate_value(
