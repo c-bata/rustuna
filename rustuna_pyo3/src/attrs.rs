@@ -20,7 +20,7 @@ static CACHED_JSON_LOADS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 // The cache key is the stored text itself, so no invalidation is needed when an attribute is
 // overwritten. Like Optuna's `get_trials(deepcopy=False)`, decoded objects are shared and must not
 // be mutated by callers. Large values bypass the cache to avoid retaining oversized keys.
-const DECODE_CACHE_CAPACITY: usize = 1 << 16;
+const DECODE_CACHE_CAPACITY: usize = 65536;
 const DECODE_CACHE_MAX_TEXT_LEN: usize = 8 * 1024;
 
 fn json_function<'py>(
