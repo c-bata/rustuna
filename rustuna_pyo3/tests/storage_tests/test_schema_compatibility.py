@@ -51,7 +51,7 @@ class SuiteAttr:
             trial.set_user_attr("optuna", {"a": 1})
             trial.storage.set_trial_system_attr(trial._trial_id, "optuna", {"b": 2})
         else:
-            trial.set_user_attrs({"rustuna": "foo"})
+            trial.set_user_attrs({"rustuna": {"x": [1, None]}})
             trial.storage.set_trial_system_attrs(trial._trial_id, {"rustuna": "bar"})
         return 1.0
 
@@ -59,13 +59,15 @@ class SuiteAttr:
         self,
         trials: list[optuna.trial.FrozenTrial] | list[rustuna.trial.PersistedTrial],
     ) -> None:
+        # Check all trials, including those written by the other library or through
+        # ToOptunaStorage / ToRustunaStorage. Attributes keep their JSON types.
         assert len(trials) == 20
-        for trial in trials[-10:]:
-            if isinstance(trial, optuna.trial.FrozenTrial):
-                assert trial.user_attrs["optuna"] == {"a": 1}
+        for trial in trials:
+            if "optuna" in trial.user_attrs:
+                assert trial.user_attrs == {"optuna": {"a": 1}}
                 assert trial.system_attrs["optuna"] == {"b": 2}
             else:
-                assert trial.user_attrs["rustuna"] == "foo"
+                assert trial.user_attrs == {"rustuna": {"x": [1, None]}}
                 assert trial.system_attrs["rustuna"] == "bar"
 
     def assert_before_resume(self, trials: list[rustuna.trial.PersistedTrial]) -> None:
@@ -384,11 +386,6 @@ def test_optuna_to_rustuna_resume(suite: Suite, backend: str) -> None:
         rustuna_study.optimize(suite.objective, n_trials=10)
 
         suite.assert_trials(rustuna_study.trials)
-        if isinstance(suite, SuiteAttr):
-            for trial in rustuna_study.trials[:10]:
-                # Attributes keep their JSON types.
-                assert trial.user_attrs == {"optuna": {"a": 1}}
-                assert trial.system_attrs == {"optuna": {"b": 2}}
         assert optuna_trial_count == 10
 
 
@@ -417,7 +414,3 @@ def test_rustuna_to_optuna_resume(suite: Suite, backend: str) -> None:
         optuna_study.optimize(suite.objective, n_trials=10)
 
         suite.assert_trials(optuna_study.trials)
-        if isinstance(suite, SuiteAttr):
-            for trial in optuna_study.trials[:10]:
-                assert trial.user_attrs == {"rustuna": "foo"}
-                assert trial.system_attrs["rustuna"] == "bar"
