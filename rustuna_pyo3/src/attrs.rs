@@ -111,7 +111,6 @@ pub fn pyobj_to_attrs_with_kind(obj: &Bound<'_, PyAny>, kind: AttrKind) -> PyRes
     }
 }
 
-/// Converts the attributes of a Python object implementing the storage protocol.
 pub fn pyobj_to_attrs(
     user_attrs: &Bound<'_, PyAny>,
     system_attrs: &Bound<'_, PyAny>,

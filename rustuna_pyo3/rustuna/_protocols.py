@@ -378,10 +378,7 @@ class StorageProtocol(Protocol):
 
 
 class CachedStorageBackend(Protocol):
-    """Protocol for Python backends used by Rustuna's ``CachedStorage``.
-
-    User and system attribute values are exchanged as JSON-serializable Python objects.
-    """
+    """Protocol for Python backends used by Rustuna's ``CachedStorage``."""
 
     def create_new_study(
         self, study_name: str, directions: list[StudyDirection]

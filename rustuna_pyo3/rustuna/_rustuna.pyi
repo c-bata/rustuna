@@ -805,8 +805,7 @@ class CachedStorage:
     """Wrap a Python CachedStorageBackend with Rustuna's in-memory cache.
 
     Args:
-        backend: The Python backend. Attribute values are exchanged as JSON-serializable
-            objects.
+        backend: The backend implements CachedStorageBackend protocol.
     """
     def __init__(self, backend: CachedStorageBackend) -> None: ...
     def create_new_study(
@@ -944,11 +943,7 @@ class InMemoryStorage:
     Args:
         apply_discard: If True, apply discard_trials() and omit discarded trials from subsequent reads.
     """
-    def __init__(
-        self,
-        *,
-        apply_discard: bool = False,
-    ) -> None: ...
+    def __init__(self, *, apply_discard: bool = False) -> None: ...
     def create_new_study(
         self, study_name: str, directions: list[StudyDirection]
     ) -> PersistedStudy: ...

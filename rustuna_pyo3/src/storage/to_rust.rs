@@ -28,9 +28,6 @@ use crate::trial::{
 //
 // To ensure consistency, all `get_*` methods must synchronize with the backend storage before
 // returning cached data.
-//
-// Attribute values are stored as JSON texts and exchanged with the Python storage as
-// JSON-serializable objects.
 pub struct ToRustStorage {
     obj: Py<PyAny>,
     cache: InMemoryStorage,

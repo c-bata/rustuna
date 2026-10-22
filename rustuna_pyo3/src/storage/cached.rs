@@ -22,9 +22,6 @@ use crate::trial::{
 };
 
 /// Adapts a `CachedStorageBackend` implemented in Python.
-///
-/// Attribute values are stored as JSON texts and exchanged with the Python backend as
-/// JSON-serializable objects, like other storages implemented in Python.
 pub(crate) struct PyCachedStorageBackend {
     obj: Py<PyAny>,
 }
