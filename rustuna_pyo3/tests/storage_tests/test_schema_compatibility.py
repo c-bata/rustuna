@@ -64,9 +64,6 @@ class SuiteAttr:
             if isinstance(trial, optuna.trial.FrozenTrial):
                 assert trial.user_attrs["optuna"] == {"a": 1}
                 assert trial.system_attrs["optuna"] == {"b": 2}
-            elif "optuna_attr:rustuna" in trial.user_attrs:
-                assert trial.user_attrs["optuna_attr:rustuna"] == '"foo"'
-                assert trial.system_attrs["optuna_attr:rustuna"] == '"bar"'
             else:
                 assert trial.user_attrs["rustuna"] == "foo"
                 assert trial.system_attrs["rustuna"] == "bar"
