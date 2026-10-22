@@ -3,6 +3,7 @@
 use pyo3::prelude::*;
 
 mod attrs;
+mod decode_cache;
 mod distribution;
 mod exception;
 mod importance;
