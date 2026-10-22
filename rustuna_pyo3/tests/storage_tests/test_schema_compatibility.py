@@ -1,26 +1,24 @@
 """Test compatibility between Optuna's and Rustuna's storage schemas.
 
-## Schema Differences between Optuna's JournalStorage and Rustuna's JournalStorage
+## Attribute values
 
-Optuna's JournalStorage serializes attribute values as JSON before writing them to
-the journal.  Consequently, a string value is JSON-encoded a second time in the
-journal record.  Rustuna's Storage API accepts only string attributes, so Rustuna
-stores its attribute maps directly and does not apply this extra JSON encoding.
-Supporting both representations in both directions would not provide complete
-compatibility, because Optuna can also write non-string values such as integers and
-floats.  Rustuna therefore intentionally does not import Optuna's typed user and
-system attribute values.
+Optuna stores arbitrary JSON values as attributes, while Rustuna's storages created from
+Python store plain strings.
 
-Rustuna writes string attributes to the Rustuna-specific ``user_attr_str`` and
-``system_attr_str`` fields.  It also writes ``{"rustuna": null}`` to Optuna's
-``user_attr`` or ``system_attr`` field.  The dummy value is required by Optuna's
-journal replay code, while the Rustuna-specific fields are ignored by Optuna.  This
-allows Optuna to replay a Rustuna journal without claiming that the attribute values
-are fully interoperable.  The same rule applies to study and trial attributes.
+Reading: attributes written by Optuna are restored.  JSON strings are unquoted and other
+values are exposed as JSON texts (e.g. ``'{"a":1}'``).
+
+Writing: ``SQLite3Storage`` writes plain strings as JSON strings into ``value_json``, so
+Optuna reads them as ``str``.  ``JournalFileStorage`` writes them to the Rustuna-specific
+``user_attr_str`` and ``system_attr_str`` fields together with a dummy ``{"rustuna": null}``
+in Optuna's ``user_attr`` or ``system_attr`` field.  The dummy value is required by
+Optuna's journal replay code, while the Rustuna-specific fields are ignored by Optuna.  The
+same rules apply to study and trial attributes.
 """
 
 from __future__ import annotations
 
+import json
 import os.path
 import tempfile
 import typing
@@ -266,14 +264,6 @@ def get_rustuna_storage(
 def test_optuna_api_resume_with_compat_storage(
     suite: Suite, backend: str, first_variant: str, second_variant: str
 ) -> None:
-    if (
-        backend == "sqlite3"
-        and isinstance(suite, (SuiteAttr, TestSuiteParam))
-        and first_variant == "via_to_optuna"
-        and second_variant == "direct"
-    ):
-        pytest.skip("Optuna cannot directly read Rustuna's SQLite3 schema.")
-
     study_name = "compat-optuna"
     with tempfile.TemporaryDirectory() as workdir:
         # Start optimization via Optuna API
@@ -328,14 +318,6 @@ def test_optuna_api_resume_with_compat_storage(
 def test_rustuna_api_resume_with_compat_storage(
     suite: Suite, backend: str, first_variant: str, second_variant: str
 ) -> None:
-    if (
-        backend == "sqlite3"
-        and isinstance(suite, (SuiteAttr, TestSuiteParam))
-        and first_variant == "direct"
-        and second_variant == "via_to_rustuna"
-    ):
-        pytest.skip("ToRustunaStorage cannot read Rustuna's raw SQLite3 attributes.")
-
     study_name = "compat-rustuna"
     with tempfile.TemporaryDirectory() as workdir:
         # Start optimization via Rustuna API
@@ -411,19 +393,18 @@ def test_optuna_to_rustuna_resume(suite: Suite, backend: str) -> None:
         rustuna_study.optimize(suite.objective, n_trials=10)
 
         suite.assert_trials(rustuna_study.trials)
-        if backend == "journal" and isinstance(suite, SuiteAttr):
+        if isinstance(suite, SuiteAttr):
             for trial in rustuna_study.trials[:10]:
-                assert trial.user_attrs == {}
-                assert trial.system_attrs == {}
+                # Storages created from Python store plain strings, so non-string values
+                # written by Optuna are exposed as JSON texts.
+                assert json.loads(trial.user_attrs["optuna"]) == {"a": 1}
+                assert json.loads(trial.system_attrs["optuna"]) == {"b": 2}
         assert optuna_trial_count == 10
 
 
 @parametrize_test_suite
 @pytest.mark.parametrize("backend", ["journal", "sqlite3"])
 def test_rustuna_to_optuna_resume(suite: Suite, backend: str) -> None:
-    if backend == "sqlite3" and isinstance(suite, (SuiteAttr, TestSuiteParam)):
-        pytest.skip("Optuna cannot read Rustuna's raw SQLite3 attributes.")
-
     study_name = "compat-rustuna-to-optuna"
     with tempfile.TemporaryDirectory() as workdir:
         rustuna_storage = get_rustuna_storage(backend, workdir, create_database=True)
@@ -448,5 +429,10 @@ def test_rustuna_to_optuna_resume(suite: Suite, backend: str) -> None:
         suite.assert_trials(optuna_study.trials)
         if isinstance(suite, SuiteAttr):
             for trial in optuna_study.trials[:10]:
-                assert trial.user_attrs == {"rustuna": None}
-                assert trial.system_attrs["rustuna"] is None
+                if backend == "journal":
+                    # Plain strings are written to Rustuna-specific fields of the journal.
+                    assert trial.user_attrs == {"rustuna": None}
+                    assert trial.system_attrs["rustuna"] is None
+                else:
+                    assert trial.user_attrs == {"rustuna": "foo"}
+                    assert trial.system_attrs["rustuna"] == "bar"

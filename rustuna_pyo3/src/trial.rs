@@ -5,7 +5,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 use rustuna_core::attr::{
-    category_labels_to_attrs, get_category_labels, AttrKey, Attrs, CategoryLabel,
+    category_labels_to_attrs, get_category_labels, AttrFormat, AttrKey, Attrs, CategoryLabel,
 };
 use rustuna_core::distribution::Distribution;
 use rustuna_core::storage::Storage;
@@ -112,7 +112,7 @@ fn study_attrs_from_distributions(distributions: &HashMap<String, PyDistribution
     let mut attrs = Attrs::new();
     for (name, distribution) in distributions {
         if let Some(labels) = &distribution.category_labels {
-            attrs.extend(category_labels_to_attrs(name, labels));
+            attrs.extend(category_labels_to_attrs(name, labels, AttrFormat::Plain));
         }
     }
     attrs
@@ -942,7 +942,7 @@ pub fn pyobject_to_persisted_trial_with_category_labels(
         let key = key.extract::<String>()?;
         let value = value.extract::<PyDistribution>()?;
         if let Some(labels) = &value.category_labels {
-            category_attrs.extend(category_labels_to_attrs(&key, labels));
+            category_attrs.extend(category_labels_to_attrs(&key, labels, AttrFormat::Plain));
         }
         distributions.insert(key, value.into());
     }

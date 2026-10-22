@@ -35,7 +35,10 @@ impl PyJournalFileStorage {
         })?;
         let storage = JournalStorage::new_with_options(
             Box::new(backend),
-            JournalStorageOptions { apply_discard },
+            JournalStorageOptions {
+                apply_discard,
+                ..Default::default()
+            },
         )
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to create journal storage: {e:?}")))?;
         let binding = StorageBinding::new(Arc::new(RwLock::new(storage)));
