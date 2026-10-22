@@ -15,7 +15,7 @@ from optuna.trial import FrozenTrial, TrialState
 
 import rustuna
 
-from ._attrs import to_optuna_attrs, to_rustuna_attrs
+from ._attrs import to_rustuna_trial_system_attrs
 from ._direction import to_optuna_directions
 from ._distribution import to_optuna_distribution, to_rustuna_distribution
 from ._frozen_study import to_frozen_study, to_persisted_study
@@ -303,7 +303,7 @@ class ToOptunaStorage(BaseStorage):
     def set_study_system_attr(
         self, study_id: int, key: str, value: JSONSerializable
     ) -> None:
-        self._storage.set_study_system_attrs(study_id, to_rustuna_attrs({key: value}))
+        self._storage.set_study_system_attrs(study_id, {key: value})
 
     def get_study_id_from_name(self, study_name: str) -> int:
         for study in self._storage.get_studies():
@@ -321,11 +321,11 @@ class ToOptunaStorage(BaseStorage):
 
     def get_study_user_attrs(self, study_id: int) -> dict[str, Any]:
         study = self._storage.get_study(study_id)
-        return to_optuna_attrs(study.user_attrs)
+        return study.user_attrs
 
     def get_study_system_attrs(self, study_id: int) -> dict[str, Any]:
         study = self._storage.get_study(study_id)
-        return to_optuna_attrs(study.system_attrs)
+        return study.system_attrs
 
     def get_all_studies(self) -> list[FrozenStudy]:
         studies: list[FrozenStudy] = []
@@ -406,7 +406,7 @@ class ToOptunaStorage(BaseStorage):
     ) -> None:
         try:
             self._storage.set_trial_system_attrs(
-                trial_id, to_rustuna_attrs({key: value})
+                trial_id, to_rustuna_trial_system_attrs({key: value})
             )
         except rustuna.exceptions.UpdateFinishedTrialError as e:
             raise optuna.exceptions.UpdateFinishedTrialError(str(e)) from e

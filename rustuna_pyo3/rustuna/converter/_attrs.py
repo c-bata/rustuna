@@ -15,7 +15,7 @@ _CONSTRAINTS_KEY = "constraints"
 _CONSTRAINTS_PREFIX = f"{_CONSTRAINTS_KEY}:"
 
 
-def to_optuna_attrs(attrs: Mapping[str, Any]) -> dict[str, Any]:
+def to_optuna_trial_system_attrs(attrs: Mapping[str, Any]) -> dict[str, Any]:
     converted = {}
     for key, value in attrs.items():
         if key.startswith(_CONSTRAINTS_PREFIX):
@@ -26,7 +26,7 @@ def to_optuna_attrs(attrs: Mapping[str, Any]) -> dict[str, Any]:
     return converted
 
 
-def to_rustuna_attrs(attrs: Mapping[str, Any]) -> dict[str, Any]:
+def to_rustuna_trial_system_attrs(attrs: Mapping[str, Any]) -> dict[str, Any]:
     converted = dict(attrs)
     # Convert Optuna's legacy constraint to Rustuna constraints
     if _CONSTRAINTS_KEY in converted:
