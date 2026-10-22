@@ -167,29 +167,56 @@ def test_rustuna_journal_attrs_are_optuna_replayable() -> None:
         with open(file_path) as f:
             logs = [json.loads(line) for line in f]
 
+        # Attributes are written in Optuna's schema.
         study_user_log = next(log for log in logs if log["op_code"] == 2)
-        assert study_user_log["user_attr"] == {"rustuna": None}
-        assert study_user_log["user_attr_str"] == {"study_user": "study value"}
+        trial_user_log = next(log for log in logs if log["op_code"] == 8)
+        assert study_user_log["user_attr"] == {"study_user": "study value"}
+        assert "user_attr_str" not in study_user_log
+        assert trial_user_log["user_attr"] == {"trial_user": "trial value"}
+        assert "user_attr_str" not in trial_user_log
 
         study_system_log = next(log for log in logs if log["op_code"] == 3)
-        assert study_system_log["system_attr"] == {"rustuna": None}
-        assert study_system_log["system_attr_str"] == {"study_system": "study value"}
-
-        trial_user_log = next(log for log in logs if log["op_code"] == 8)
-        assert trial_user_log["user_attr"] == {"rustuna": None}
-        assert trial_user_log["user_attr_str"] == {"trial_user": "trial value"}
-
         trial_system_log = next(log for log in logs if log["op_code"] == 9)
-        assert trial_system_log["system_attr"] == {"rustuna": None}
-        assert trial_system_log["system_attr_str"] == {"trial_system": "trial value"}
+        assert study_system_log["system_attr"] == {"study_system": "study value"}
+        assert "system_attr_str" not in study_system_log
+        assert trial_system_log["system_attr"] == {"trial_system": "trial value"}
+        assert "system_attr_str" not in trial_system_log
 
         optuna_storage = JournalStorage(JournalFileBackend(file_path))
         optuna_study = optuna.load_study(
             storage=optuna_storage, study_name="journal-attrs"
         )
-        assert optuna_study.user_attrs == {"rustuna": None}
+        assert optuna_study.user_attrs == {"study_user": "study value"}
         assert optuna_storage.get_study_system_attrs(optuna_study._study_id) == {
-            "rustuna": None
+            "study_system": "study value"
         }
-        assert optuna_study.trials[0].user_attrs == {"rustuna": None}
-        assert optuna_study.trials[0].system_attrs == {"rustuna": None}
+        assert optuna_study.trials[0].user_attrs == {"trial_user": "trial value"}
+        assert optuna_study.trials[0].system_attrs == {"trial_system": "trial value"}
+
+
+def test_optuna_journal_user_attrs_are_readable() -> None:
+    with tempfile.TemporaryDirectory() as workdir:
+        file_path = os.path.join(workdir, "attrs.journal")
+        optuna_study = optuna.create_study(
+            storage=JournalStorage(JournalFileBackend(file_path)),
+            study_name="optuna-attrs",
+        )
+        optuna_study.set_user_attr("tags", ["a", "b"])
+        optuna_study.set_user_attr("name", "foo")
+        optuna_study.add_trial(
+            optuna.trial.create_trial(
+                value=1.0, user_attrs={"count": 3, "label": "foo"}
+            )
+        )
+        optuna_trial = optuna_study.ask()
+        optuna_trial.set_user_attr("stats", {"n_calls": 5})
+        optuna_study.tell(optuna_trial, 2.0)
+
+        rustuna_study = rustuna.load_study(
+            storage=rustuna.storages.JournalFileStorage(file_path),
+            study_name="optuna-attrs",
+        )
+        trials = rustuna_study.get_trials()
+        assert rustuna_study.user_attrs == {"tags": ["a", "b"], "name": "foo"}
+        assert trials[0].user_attrs == {"count": 3, "label": "foo"}
+        assert trials[1].user_attrs == {"stats": {"n_calls": 5}}

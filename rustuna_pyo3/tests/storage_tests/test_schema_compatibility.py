@@ -2,23 +2,17 @@
 
 ## Attribute values
 
-Optuna stores arbitrary JSON values as attributes, while Rustuna's storages created from
-Python store plain strings.
-
-Reading: attributes written by Optuna are restored.  JSON strings are unquoted and other
-values are exposed as JSON texts (e.g. ``'{"a":1}'``).
-
-Writing: ``SQLite3Storage`` writes plain strings as JSON strings into ``value_json``, so
-Optuna reads them as ``str``.  ``JournalFileStorage`` writes them to the Rustuna-specific
-``user_attr_str`` and ``system_attr_str`` fields together with a dummy ``{"rustuna": null}``
-in Optuna's ``user_attr`` or ``system_attr`` field.  The dummy value is required by
-Optuna's journal replay code, while the Rustuna-specific fields are ignored by Optuna.  The
-same rules apply to study and trial attributes.
+Optuna stores arbitrary JSON values as attributes.  Rustuna's storages created from Python
+store the same JSON texts (``value_json`` in ``RDBStorage`` and raw JSON values in
+``JournalStorage``), so user and system attributes written by one library are read with
+the same types by the other.  Rustuna's own system
+attributes (e.g. category labels) are stored as JSON strings.  Their meanings are
+library-specific, so a system attribute written by one library is generally not
+interpreted by the other.
 """
 
 from __future__ import annotations
 
-import json
 import os.path
 import tempfile
 import typing
@@ -57,7 +51,7 @@ class SuiteAttr:
             trial.set_user_attr("optuna", {"a": 1})
             trial.storage.set_trial_system_attr(trial._trial_id, "optuna", {"b": 2})
         else:
-            trial.set_user_attrs({"rustuna": "foo"})
+            trial.set_user_attrs({"rustuna": {"x": [1, None]}})
             trial.storage.set_trial_system_attrs(trial._trial_id, {"rustuna": "bar"})
         return 1.0
 
@@ -65,16 +59,15 @@ class SuiteAttr:
         self,
         trials: list[optuna.trial.FrozenTrial] | list[rustuna.trial.PersistedTrial],
     ) -> None:
+        # Check all trials, including those written by the other library or through
+        # ToOptunaStorage / ToRustunaStorage. Attributes keep their JSON types.
         assert len(trials) == 20
-        for trial in trials[-10:]:
-            if isinstance(trial, optuna.trial.FrozenTrial):
-                assert trial.user_attrs["optuna"] == {"a": 1}
+        for trial in trials:
+            if "optuna" in trial.user_attrs:
+                assert trial.user_attrs == {"optuna": {"a": 1}}
                 assert trial.system_attrs["optuna"] == {"b": 2}
-            elif "optuna_attr:rustuna" in trial.user_attrs:
-                assert trial.user_attrs["optuna_attr:rustuna"] == '"foo"'
-                assert trial.system_attrs["optuna_attr:rustuna"] == '"bar"'
             else:
-                assert trial.user_attrs["rustuna"] == "foo"
+                assert trial.user_attrs == {"rustuna": {"x": [1, None]}}
                 assert trial.system_attrs["rustuna"] == "bar"
 
     def assert_before_resume(self, trials: list[rustuna.trial.PersistedTrial]) -> None:
@@ -393,12 +386,6 @@ def test_optuna_to_rustuna_resume(suite: Suite, backend: str) -> None:
         rustuna_study.optimize(suite.objective, n_trials=10)
 
         suite.assert_trials(rustuna_study.trials)
-        if isinstance(suite, SuiteAttr):
-            for trial in rustuna_study.trials[:10]:
-                # Storages created from Python store plain strings, so non-string values
-                # written by Optuna are exposed as JSON texts.
-                assert json.loads(trial.user_attrs["optuna"]) == {"a": 1}
-                assert json.loads(trial.system_attrs["optuna"]) == {"b": 2}
         assert optuna_trial_count == 10
 
 
@@ -427,12 +414,3 @@ def test_rustuna_to_optuna_resume(suite: Suite, backend: str) -> None:
         optuna_study.optimize(suite.objective, n_trials=10)
 
         suite.assert_trials(optuna_study.trials)
-        if isinstance(suite, SuiteAttr):
-            for trial in optuna_study.trials[:10]:
-                if backend == "journal":
-                    # Plain strings are written to Rustuna-specific fields of the journal.
-                    assert trial.user_attrs == {"rustuna": None}
-                    assert trial.system_attrs["rustuna"] is None
-                else:
-                    assert trial.user_attrs == {"rustuna": "foo"}
-                    assert trial.system_attrs["rustuna"] == "bar"
