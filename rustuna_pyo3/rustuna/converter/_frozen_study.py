@@ -26,6 +26,6 @@ def to_persisted_study(study: FrozenStudy) -> rustuna.study.PersistedStudy:
         id=study._study_id,
         name=study.study_name,
         directions=to_rustuna_directions(study.directions),
-        user_attrs=to_rustuna_attrs(study.user_attrs),
+        user_attrs=dict(study.user_attrs),
         system_attrs=to_rustuna_attrs(study.system_attrs),
     )

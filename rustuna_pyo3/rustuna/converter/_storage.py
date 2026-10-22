@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import threading
 import typing
 import uuid
@@ -200,29 +199,27 @@ class ToRustunaStorage:
             study_id, trial_number
         )
 
-    def set_study_system_attrs(self, study_id: int, attrs: dict[str, str]) -> None:
+    def set_study_system_attrs(self, study_id: int, attrs: dict[str, Any]) -> None:
         for key, value in attrs.items():
             self._storage.set_study_system_attr(study_id, key, value)
 
-    def set_study_user_attrs(self, study_id: int, attrs: dict[str, str]) -> None:
+    def set_study_user_attrs(self, study_id: int, attrs: dict[str, Any]) -> None:
         for key, value in attrs.items():
             self._storage.set_study_user_attr(study_id, key, value)
 
-    def set_trial_system_attrs(self, trial_id: int, attrs: dict[str, str]) -> None:
+    def set_trial_system_attrs(self, trial_id: int, attrs: dict[str, Any]) -> None:
         for key, value in attrs.items():
             self._storage.set_trial_system_attr(trial_id, key, value)
 
-    def set_trial_user_attrs(self, trial_id: int, attrs: dict[str, str]) -> None:
+    def set_trial_user_attrs(self, trial_id: int, attrs: dict[str, Any]) -> None:
         for key, value in attrs.items():
             self._storage.set_trial_user_attr(trial_id, key, value)
 
-    def get_study_user_attr(self, study_id: int, key: str) -> str:
-        value = self._storage.get_study_user_attrs(study_id)[key]
-        return json.dumps(value) if not isinstance(value, str) else value
+    def get_study_user_attr(self, study_id: int, key: str) -> Any:
+        return self._storage.get_study_user_attrs(study_id)[key]
 
-    def get_study_system_attr(self, study_id: int, key: str) -> str:
-        value = self._storage.get_study_system_attrs(study_id)[key]
-        return json.dumps(value) if not isinstance(value, str) else value
+    def get_study_system_attr(self, study_id: int, key: str) -> Any:
+        return self._storage.get_study_system_attrs(study_id)[key]
 
     def set_category_labels(
         self,
@@ -301,7 +298,7 @@ class ToOptunaStorage(BaseStorage):
         self._storage.delete_study(study_id=study_id)
 
     def set_study_user_attr(self, study_id: int, key: str, value: Any) -> None:
-        self._storage.set_study_user_attrs(study_id, to_rustuna_attrs({key: value}))
+        self._storage.set_study_user_attrs(study_id, {key: value})
 
     def set_study_system_attr(
         self, study_id: int, key: str, value: JSONSerializable
@@ -400,7 +397,7 @@ class ToOptunaStorage(BaseStorage):
 
     def set_trial_user_attr(self, trial_id: int, key: str, value: Any) -> None:
         try:
-            self._storage.set_trial_user_attrs(trial_id, to_rustuna_attrs({key: value}))
+            self._storage.set_trial_user_attrs(trial_id, {key: value})
         except rustuna.exceptions.UpdateFinishedTrialError as e:
             raise optuna.exceptions.UpdateFinishedTrialError(str(e)) from e
 
