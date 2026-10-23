@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
+use rustuna_core::attr::AttrFormat;
 use rustuna_core::storage::Storage;
 use rustuna_storage::journal::file::JournalFileBackend;
 use rustuna_storage::journal::storage::{JournalStorage, JournalStorageOptions};
@@ -35,7 +36,10 @@ impl PyJournalFileStorage {
         })?;
         let storage = JournalStorage::new_with_options(
             Box::new(backend),
-            JournalStorageOptions { apply_discard },
+            JournalStorageOptions {
+                apply_discard,
+                attr_format: AttrFormat::Json,
+            },
         )
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to create journal storage: {e:?}")))?;
         let binding = StorageBinding::new(Arc::new(RwLock::new(storage)));
@@ -151,7 +155,12 @@ impl PyJournalFileStorage {
         self.binding.get_trial_number_from_id(py, trial_id)
     }
 
-    fn get_study_user_attr(&self, py: Python<'_>, study_id: u32, key: String) -> PyResult<String> {
+    fn get_study_user_attr(
+        &self,
+        py: Python<'_>,
+        study_id: u32,
+        key: String,
+    ) -> PyResult<Py<PyAny>> {
         self.binding.get_study_user_attr(py, study_id, key)
     }
 
@@ -160,7 +169,7 @@ impl PyJournalFileStorage {
         py: Python<'_>,
         study_id: u32,
         key: String,
-    ) -> PyResult<String> {
+    ) -> PyResult<Py<PyAny>> {
         self.binding.get_study_system_attr(py, study_id, key)
     }
 

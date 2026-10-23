@@ -19,9 +19,9 @@ defaults:
 
 env:
   MATURIN_VERSION: v1.14.1
-  UV_VERSION: 0.12.1
+  UV_VERSION: 0.13.4
   UV_EXCLUDE_NEWER: 5 days
-  PIP_VERSION: 26.1.2
+  PIP_VERSION: 26.2.2
   TWINE_VERSION: 6.2.0
   ABI3AUDIT_VERSION: 0.0.26
   BUILD_ARGS: >-
@@ -401,12 +401,12 @@ jobs:
             exit 1
           fi
       - name: Check package metadata
-        run: uvx --from "twine==$TWINE_VERSION" twine check dist/*
+        run: uvx --exclude-newer-package certifi=false --from "twine==$TWINE_VERSION" twine check dist/*
       - name: Audit the abi3 wheels
         # Verify that the stable ABI wheels really only use the limited API. abi3audit does not
         # know the `abi3t` tag yet, so only the cp311-abi3 wheels are checked.
         run: >-
-          uvx --from "abi3audit==$ABI3AUDIT_VERSION"
+          uvx --exclude-newer-package certifi=false --from "abi3audit==$ABI3AUDIT_VERSION"
           abi3audit --strict --verbose dist/*-cp311-abi3-*.whl
       - name: Upload verified distributions
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

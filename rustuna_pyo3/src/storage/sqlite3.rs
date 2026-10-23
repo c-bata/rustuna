@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
+use rustuna_core::attr::AttrFormat;
 use rustuna_core::storage::Storage;
 use rustuna_storage::cache::CachedStorage;
 use rustuna_storage::sqlite3::{SQLite3Storage, SQLite3StorageOptions};
@@ -30,11 +31,14 @@ impl PySQLite3Storage {
     #[new]
     #[pyo3(signature = (file_path, *, create_database = true, apply_discard = false))]
     fn py_new(file_path: &str, create_database: bool, apply_discard: bool) -> PyResult<Self> {
-        let backend =
-            SQLite3Storage::new_with_option(file_path, SQLite3StorageOptions { apply_discard })
-                .map_err(|e| {
-                    PyRuntimeError::new_err(format!("Failed to open the SQLite3 file: {e:?}"))
-                })?;
+        let backend = SQLite3Storage::new_with_option(
+            file_path,
+            SQLite3StorageOptions {
+                apply_discard,
+                attr_format: AttrFormat::Json,
+            },
+        )
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to open the SQLite3 file: {e:?}")))?;
         if create_database {
             backend.create_database().map_err(|e| {
                 PyRuntimeError::new_err(format!("Failed to create the database: {e:?}"))
@@ -159,7 +163,12 @@ impl PySQLite3Storage {
         self.binding.get_trial_number_from_id(py, trial_id)
     }
 
-    fn get_study_user_attr(&self, py: Python<'_>, study_id: u32, key: String) -> PyResult<String> {
+    fn get_study_user_attr(
+        &self,
+        py: Python<'_>,
+        study_id: u32,
+        key: String,
+    ) -> PyResult<Py<PyAny>> {
         self.binding.get_study_user_attr(py, study_id, key)
     }
 
@@ -168,7 +177,7 @@ impl PySQLite3Storage {
         py: Python<'_>,
         study_id: u32,
         key: String,
-    ) -> PyResult<String> {
+    ) -> PyResult<Py<PyAny>> {
         self.binding.get_study_system_attr(py, study_id, key)
     }
 
